@@ -16,6 +16,10 @@ uint8_t *glue_rom_image(size_t *size);
 
 /* Write cartridge (battery) RAM to <rom>.sav if it changed. */
 void     glue_sram_flush(void);
+/* Read-only view of the cartridge RAM (32 KB: page 0 then page 1), and the path of the .sav file
+ * ("" when saving is off, e.g. SMS_NO_SAVE) - for game hooks that keep data next to the save. */
+const uint8_t *glue_sram_image(size_t *size);
+const char    *glue_save_path(void);
 
 /* Initialise bus/VDP/CPU for a fresh run. frame_limit==0 means run forever. */
 void     glue_init(bool is_gg, uint64_t frame_limit);

@@ -21,6 +21,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static SDL_Window   *g_win;
 static SDL_Renderer *g_ren;
@@ -150,6 +151,50 @@ static uint8_t pad_button(Uint8 b){
 
 uint8_t host_get_pad1(void){ return (uint8_t)(g_pad | g_pad_btn | g_pad_axis); }
 
+/* HUD navigation with hold-to-repeat (own timer for keyboard AND pad; SDL key repeat is ignored).
+ * A direction is "held" while any source holds it (keyboard / D-pad / left stick), so two sources
+ * (e.g. a pad-to-keyboard mapper app) never fire a second step. Repeat: first after 400 ms,
+ * then accelerating to every presented frame (~60 steps/s) - e.g. EXP x1 -> x100 in ~3 s. */
+enum { NAV_KEY = 1, NAV_DPAD = 2, NAV_STICK = 4 };
+static uint8_t  g_nav_src[4];          /* index = HUD_KEY_UP/DOWN/LEFT/RIGHT */
+static int      g_nav_dir = -1;        /* the direction that auto-repeats */
+static int      g_nav_reps;
+static uint32_t g_nav_next;
+static void nav_clear(void){ memset(g_nav_src, 0, sizeof g_nav_src); g_nav_dir = -1; }
+static void nav_set(int dir, int src, bool down){
+    if (dir < 0 || dir > 3) return;
+    uint8_t was = g_nav_src[dir];
+    g_nav_src[dir] = (uint8_t)(down ? (was | src) : (was & ~src));
+    if (down && !was){ hud_key(dir); g_nav_dir = dir; g_nav_reps = 0; g_nav_next = SDL_GetTicks() + 400; }
+    if (!g_nav_src[dir] && g_nav_dir == dir) g_nav_dir = -1;
+}
+static void nav_tick(void){
+    if (g_nav_dir < 0 || !hud_is_open()) return;
+    uint32_t now = SDL_GetTicks();
+    if ((int32_t)(now - g_nav_next) < 0) return;
+    hud_key(g_nav_dir);
+    g_nav_reps++;
+    int iv = 130 - 10 * g_nav_reps;               /* 120, 110, ... ms */
+    if (iv < 30) iv = g_nav_reps > 24 ? 0 : 30;   /* then every frame */
+    g_nav_next = now + (uint32_t)iv;
+}
+static int key_nav_dir(SDL_Keycode k){
+    switch (k){ case SDLK_UP: return HUD_KEY_UP; case SDLK_DOWN: return HUD_KEY_DOWN;
+                case SDLK_LEFT: return HUD_KEY_LEFT; case SDLK_RIGHT: return HUD_KEY_RIGHT; default: return -1; }
+}
+static int pad_nav_dir(Uint8 b){
+    switch (b){ case SDL_CONTROLLER_BUTTON_DPAD_UP: return HUD_KEY_UP; case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return HUD_KEY_DOWN;
+                case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return HUD_KEY_LEFT; case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return HUD_KEY_RIGHT; default: return -1; }
+}
+/* left stick in the HUD, with hysteresis (on > 16000, off < 10000) */
+static void nav_stick(int axis, int v){
+    int neg = axis == SDL_CONTROLLER_AXIS_LEFTX ? HUD_KEY_LEFT : HUD_KEY_UP;
+    int pos = axis == SDL_CONTROLLER_AXIS_LEFTX ? HUD_KEY_RIGHT : HUD_KEY_DOWN;
+    if (v < -16000) nav_set(neg, NAV_STICK, true); else if (v > -10000) nav_set(neg, NAV_STICK, false);
+    if (v >  16000) nav_set(pos, NAV_STICK, true); else if (v <  10000) nav_set(pos, NAV_STICK, false);
+}
+static void hud_toggle(void){ hud_key(HUD_KEY_TOGGLE); g_pad = 0; g_pad_btn = 0; g_pad_axis = 0; nav_clear(); }
+
 /* ---- wall-clock frame limiter ----
  * Deadline-advance model: the deadline moves forward by exactly one frame period
  * each present, so the long-term rate is drift-free. We coarse-sleep (SDL_Delay)
@@ -213,29 +258,33 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
             else quit = true;
         }
         else if (e.type == SDL_CONTROLLERDEVICEADDED) pad_open(e.cdevice.which);
+        else if (e.type == SDL_CONTROLLERDEVICEREMOVED){     /* pad timed out / unplugged: release all */
+            g_pad_btn = 0; g_pad_axis = 0; g_pad_turbo = false; nav_clear();
+        }
         /* ---- settings HUD (hud.c): F1 / pad Back toggles; while open it owns the keys ---- */
-        else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F1){ hud_key(HUD_KEY_TOGGLE); g_pad = 0; g_pad_btn = 0; g_pad_axis = 0; }
-        else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK){ hud_key(HUD_KEY_TOGGLE); g_pad = 0; g_pad_btn = 0; g_pad_axis = 0; }
+        else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F1){ if (!e.key.repeat) hud_toggle(); }
+        else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK) hud_toggle();
         else if (hud_is_open() && e.type == SDL_KEYDOWN){
+            if (e.key.repeat) continue;                 /* own repeat timer (nav_tick) */
             switch (e.key.keysym.sym){
-                case SDLK_UP: hud_key(HUD_KEY_UP); break;        case SDLK_DOWN: hud_key(HUD_KEY_DOWN); break;
-                case SDLK_LEFT: hud_key(HUD_KEY_LEFT); break;    case SDLK_RIGHT: hud_key(HUD_KEY_RIGHT); break;
-                case SDLK_ESCAPE: case SDLK_RETURN: case SDLK_z: case SDLK_x: hud_key(HUD_KEY_CLOSE); break;
-                default: break;
+                case SDLK_ESCAPE: case SDLK_RETURN: case SDLK_z: case SDLK_x: hud_key(HUD_KEY_CLOSE); nav_clear(); break;
+                case SDLK_q: case SDLK_PAGEUP:   hud_key(HUD_KEY_PAGE_PREV); break;   /* HUD pages (tabs) */
+                case SDLK_e: case SDLK_PAGEDOWN: hud_key(HUD_KEY_PAGE_NEXT); break;
+                default: nav_set(key_nav_dir(e.key.keysym.sym), NAV_KEY, true); break;
             }
         }
+        else if (hud_is_open() && e.type == SDL_KEYUP) nav_set(key_nav_dir(e.key.keysym.sym), NAV_KEY, false);
         else if (hud_is_open() && e.type == SDL_CONTROLLERBUTTONDOWN){
             switch (e.cbutton.button){
-                case SDL_CONTROLLER_BUTTON_DPAD_UP: hud_key(HUD_KEY_UP); break;
-                case SDL_CONTROLLER_BUTTON_DPAD_DOWN: hud_key(HUD_KEY_DOWN); break;
-                case SDL_CONTROLLER_BUTTON_DPAD_LEFT: hud_key(HUD_KEY_LEFT); break;
-                case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: hud_key(HUD_KEY_RIGHT); break;
-                case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_START: hud_key(HUD_KEY_CLOSE); break;
-                default: break;
+                case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_START: hud_key(HUD_KEY_CLOSE); nav_clear(); break;
+                case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  hud_key(HUD_KEY_PAGE_PREV); break;
+                case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: hud_key(HUD_KEY_PAGE_NEXT); break;
+                default: nav_set(pad_nav_dir(e.cbutton.button), NAV_DPAD, true); break;
             }
         }
-        else if (hud_is_open() && (e.type == SDL_KEYUP || e.type == SDL_CONTROLLERBUTTONUP || e.type == SDL_CONTROLLERAXISMOTION)){
-            /* swallowed while the HUD is open */
+        else if (hud_is_open() && e.type == SDL_CONTROLLERBUTTONUP) nav_set(pad_nav_dir(e.cbutton.button), NAV_DPAD, false);
+        else if (hud_is_open() && e.type == SDL_CONTROLLERAXISMOTION){
+            if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX || e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) nav_stick(e.caxis.axis, e.caxis.value);
         }
         else if (e.type == SDL_CONTROLLERBUTTONDOWN){
             if (e.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) g_pad_turbo = true;
@@ -261,6 +310,7 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
             g_pad &= (uint8_t)~key_to_pad(e.key.keysym.sym);
         }
     }
+    nav_tick();
 
     uint64_t end=SDL_GetPerformanceCounter();
     if(g_work_start && g_work_count<8192)g_work_ms[g_work_count++]=(end-g_work_start)*1000.0/SDL_GetPerformanceFrequency();

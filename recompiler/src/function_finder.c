@@ -360,6 +360,9 @@ static bool insn_writes_rp(const Z80Insn *in, int preg){
 }
 static bool push_feeds_call(const TraceResult *t, int i);
 bool trace_computed_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr){
+    uint16_t pa; return trace_computed_call_push(t, jp_addr, cont_addr, &pa);
+}
+bool trace_computed_call_push(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr, uint16_t *push_addr){
     /* The Z80 synthesises `call (hl)` as `ld rr,ret ; push rr ; ... ; jp (hl)`.
      * The push is often immediately before the jp, but it can be SEPARATED from
      * it by the address computation that reloads the jump register — notably a
@@ -370,6 +373,7 @@ bool trace_computed_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_
     int ji=-1; for (int i=0;i<t->insn_count;i++) if (t->insns[i].addr==jp_addr){ ji=i; break; }
     if (ji<0) return false;
     int pend=0;                                 /* pops seen going backward, awaiting a push */
+    int incsp=0;                                /* `inc sp` seen (two = one pop) */
     for (int i=ji-1; i>=0; i--){
         const TracedInsn *cur=&t->insns[i], *nxt=&t->insns[i+1];
         if ((uint16_t)(cur->addr + cur->insn.length) != nxt->addr) break;  /* left the block */
@@ -381,10 +385,16 @@ bool trace_computed_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_
                 case 0xC5: preg=0; break; case 0xD5: preg=1; break;
                 case 0xE5: preg=2; break; case 0xF5: preg=3; break;
                 case 0xC1: case 0xD1: case 0xE1: case 0xF1: ispop=1; break;
+                /* `inc sp ; inc sp` drops a pushed word = a pop (Miracle Warriors' divide $249F:
+                 * `push hl ; sbc hl,de ; ... ex (sp),hl ; inc sp ; inc sp`); any other SP change
+                 * leaves the stack shape unknown. */
+                case 0x33: if (++incsp == 2){ incsp=0; ispop=1; } break;
+                case 0x3B: case 0xF9: case 0x31: return false;
             }
         } else if (in->prefix==Z80_PFX_DD || in->prefix==Z80_PFX_FD){
             if      (in->opcode==0xE5) preg=(in->prefix==Z80_PFX_DD)?4:5;
             else if (in->opcode==0xE1) ispop=1;
+            else if (in->opcode==0xF9) return false;     /* ld sp,ix/iy */
         }
         if (ispop){ pend++; continue; }
         if (preg>=0){
@@ -400,7 +410,7 @@ bool trace_computed_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_
                        ? (ld->opcode==0x01?0:ld->opcode==0x11?1:ld->opcode==0x21?2:-1)
                        : (((ld->prefix==Z80_PFX_DD||ld->prefix==Z80_PFX_FD)&&ld->opcode==0x21)
                            ?(ld->prefix==Z80_PFX_DD?4:5):-1);
-                if (lr==preg && ld->imm_bits==16){ *cont_addr=ld->imm; return true; }
+                if (lr==preg && ld->imm_bits==16){ *cont_addr=ld->imm; *push_addr=cur->addr; return true; }
                 if (insn_writes_rp(ld, preg)) break;  /* redefined by a non-immediate */
             }
             return false;                       /* couldn't resolve to an immediate */
@@ -454,7 +464,27 @@ static bool push_feeds_call(const TraceResult *t, int i){
  * An unconditional RET whose straight-line block ends with an UNMATCHED push is not a return.
  * A second unmatched push below it, fed by `ld rr,nn16`, is the continuation the target's own
  * `ret` resumes at (same contract as a computed call). */
+static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont,
+                          uint16_t *tgt_addr, bool *has_tgt);
 bool trace_ret_jump(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont){
+    uint16_t tg; bool ht; return ret_jump_scan(t, ret_addr, cont_addr, has_cont, &tg, &ht);
+}
+/* The pushed jump TARGET of a `push target ; ... ; ret [cc]` computed jump, when it is a constant
+ * (`ld rr,nn16 ; push rr`, e.g. Golvellius $1B3D `ld hl,$1B74 ; push hl ; ... ; ret c`): the
+ * finder registers it as a function entry, else the RET dispatches to an unknown address. */
+static uint16_t g_rj_push;     /* address of the target push found by the last ret_jump_scan */
+bool trace_ret_jump_push(const TraceResult *t, uint16_t ret_addr, uint16_t *push_addr){
+    uint16_t c, tg; bool hc, ht;
+    if (!ret_jump_scan(t, ret_addr, &c, &hc, &tg, &ht)) return false;
+    *push_addr = g_rj_push; return true;
+}
+bool trace_ret_jump_target(const TraceResult *t, uint16_t ret_addr, uint16_t *tgt_addr){
+    uint16_t c; bool hc, ht=false;
+    return ret_jump_scan(t, ret_addr, &c, &hc, tgt_addr, &ht) && ht;
+}
+static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont,
+                          uint16_t *tgt_addr, bool *has_tgt){
+    *has_tgt=false;
     int ri=-1; for (int i=0;i<t->insn_count;i++) if (t->insns[i].addr==ret_addr){ ri=i; break; }
     if (ri<0) return false;
     const Z80Insn *r=&t->insns[ri].insn;
@@ -462,6 +492,7 @@ bool trace_ret_jump(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr
     if (!((r->cf==Z80_CF_RET && r->opcode==0xC9) || (r->cf==Z80_CF_RET_COND && (r->opcode&0xC7)==0xC0))) return false;
     *has_cont=false;
     int pend=0, found=0, fidx[2]={-1,-1}, fpreg[2]={-1,-1};
+    int incsp=0;
     for (int i=ri-1; i>=0 && found<2; i--){
         const TracedInsn *cur=&t->insns[i], *nxt=&t->insns[i+1];
         if ((uint16_t)(cur->addr + cur->insn.length) != nxt->addr) break;
@@ -473,10 +504,16 @@ bool trace_ret_jump(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr
                 case 0xC5: preg=0; break; case 0xD5: preg=1; break;
                 case 0xE5: preg=2; break; case 0xF5: preg=3; break;
                 case 0xC1: case 0xD1: case 0xE1: case 0xF1: ispop=1; break;
+                /* `inc sp ; inc sp` drops a pushed word = a pop (Miracle Warriors' divide $249F:
+                 * `push hl ; sbc hl,de ; ... ex (sp),hl ; inc sp ; inc sp`); any other SP change
+                 * leaves the stack shape unknown. */
+                case 0x33: if (++incsp == 2){ incsp=0; ispop=1; } break;
+                case 0x3B: case 0xF9: case 0x31: return false;
             }
         } else if (in->prefix==Z80_PFX_DD || in->prefix==Z80_PFX_FD){
             if      (in->opcode==0xE5) preg=(in->prefix==Z80_PFX_DD)?4:5;
             else if (in->opcode==0xE1) ispop=1;
+            else if (in->opcode==0xF9) return false;     /* ld sp,ix/iy */
         }
         if (ispop){ pend++; continue; }
         if (preg>=0){
@@ -486,6 +523,17 @@ bool trace_ret_jump(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr
         }
     }
     if (found==0) return false;
+    g_rj_push = t->insns[fidx[0]].addr;
+    for (int j=fidx[0]-1; j>=0; j--){                 /* resolve the target push to a constant */
+        const Z80Insn *ld=&t->insns[j].insn;
+        int lr = (ld->prefix==Z80_PFX_NONE)
+               ? (ld->opcode==0x01?0:ld->opcode==0x11?1:ld->opcode==0x21?2:-1)
+               : (((ld->prefix==Z80_PFX_DD||ld->prefix==Z80_PFX_FD)&&ld->opcode==0x21)
+                   ?(ld->prefix==Z80_PFX_DD?4:5):-1);
+        if (lr==fpreg[0] && ld->imm_bits==16){ *tgt_addr=ld->imm; *has_tgt=true; break; }
+        if (insn_writes_rp(ld, fpreg[0])) break;
+        if ((uint16_t)(t->insns[j].addr + ld->length) != t->insns[j+1].addr) break;   /* stay in the block */
+    }
     if (found==2){
         for (int j=fidx[1]-1; j>=0; j--){
             const Z80Insn *ld=&t->insns[j].insn;
@@ -1111,6 +1159,15 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
                     (in->opcode==0x21||in->opcode==0x11||in->opcode==0x01)){
                     int s = seed_jp_island(rom, fl, (uint16_t)in->imm, &bs, blacklist, blacklist_count);
                     if (s>0){ isl_seeded += s; changed=true; }
+                }
+                if (in->cf==Z80_CF_RET || in->cf==Z80_CF_RET_COND){
+                    uint16_t rt; int rb;
+                    if (trace_ret_jump_target(&tr, tr.insns[k].addr, &rt) && rt < 0xC000 &&
+                        !in_blacklist(blacklist,blacklist_count,rt) && bankstate_target(&bs, rt, &rb) &&
+                        funclist_find(fl,rt,rb)<0){
+                        funclist_add(fl,rt,rb,NULL,FUNC_SRC_JUMP,true);
+                        changed=true;
+                    }
                 }
                 bool is_call = (in->cf==Z80_CF_CALL || in->cf==Z80_CF_CALL_COND);
                 bool is_tailjump = (in->cf==Z80_CF_JUMP && in->has_target &&

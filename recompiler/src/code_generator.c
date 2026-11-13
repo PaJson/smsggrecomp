@@ -125,6 +125,18 @@ void cg_probe(const SmsRom *rom, const FuncList *fl){
 
 static const FuncList   *G_FL;   /* function table (target name lookups) */
 static const TraceResult*G_TR;   /* trace of the function being emitted  */
+/* Path-dependent computed calls in the function being emitted: `push cont` at G_AMB_PUSH[i],
+ * `jp (hl)` at G_AMB_JP[i], with a label in between (some paths reach the jp without the push,
+ * e.g. Golvellius $3D50 `jr z,$3D60` skips $3D59 `push bc` before $3D6A `jp (hl)`). The push
+ * records SP in a local `_ccsp_<jp>`; the jp is a computed call only if SP still matches,
+ * otherwise a plain tail jump. Without this, the no-push path resumed at the continuation. */
+#define MAX_AMB 64
+static uint16_t G_AMB_PUSH[MAX_AMB], G_AMB_JP[MAX_AMB];
+static int      G_NAMB;
+static int amb_by_jp(uint16_t a){ for (int i=0;i<G_NAMB;i++) if (G_AMB_JP[i]==a) return i; return -1; }
+static void emit_push_tag(FILE *o, uint16_t a){
+    for (int i=0;i<G_NAMB;i++) if (G_AMB_PUSH[i]==a) fprintf(o,"    _ccsp_%04X = s->sp;   /* path-dependent push (see G_AMB_PUSH) */\n", G_AMB_JP[i]);
+}
 static const GameConfig *G_CFG;  /* for [insn_hooks] */
 /* Index of the [insn_hooks] entry at `a` for a function of bank `fbank`, or -1. */
 static int insn_hook_at(uint16_t a, int fbank){
@@ -689,6 +701,9 @@ static void emit_cf(FILE *o, const Z80Insn *in, uint16_t addr){
     switch (in->cf){
         case Z80_CF_RET:{
             uint16_t rcont; bool rhas=false;
+            bool ramb = amb_by_jp(addr) >= 0;
+            if (ramb)   /* path-dependent push (G_AMB_*): a computed jump only if this path pushed */
+                fprintf(o,"        if (s->sp != _ccsp_%04X) { s->sp = (uint16_t)(s->sp + 2); return; }   /* this path did not push: plain return */\n        _ccsp_%04X = 0xFFFF;\n", addr, addr);
             if (G_TR && trace_ret_jump(G_TR, addr, &rcont, &rhas)){
                 /* `push target ; ... ; ret` is a computed jump, not a return */
                 if (rhas && tr_has(rcont))
@@ -704,6 +719,8 @@ static void emit_cf(FILE *o, const Z80Insn *in, uint16_t addr){
             break; }
         case Z80_CF_RET_COND:{ int cc=(in->opcode>>3)&7;
             uint16_t rcont; bool rhas=false;
+            if (amb_by_jp(addr) >= 0)   /* path-dependent push: plain conditional return on paths that did not push */
+                fprintf(o,"        if (s->sp != _ccsp_%04X) { if (%s) { s->cyc += 6; s->sp = (uint16_t)(s->sp + 2); return; } } else if (%s) _ccsp_%04X = 0xFFFF;\n", addr, cond(cc), cond(cc), addr);
             if (G_TR && trace_ret_jump(G_TR, addr, &rcont, &rhas)){
                 /* `push target ; ... ; ret cc` = conditional computed jump (see Z80_CF_RET) */
                 fprintf(o,"        if (%s) { s->cyc += 6; uint16_t _t = sms_read16(s->sp); s->sp = (uint16_t)(s->sp + 2);", cond(cc));
@@ -722,7 +739,17 @@ static void emit_cf(FILE *o, const Z80Insn *in, uint16_t addr){
                 const char *idx = (in->prefix==Z80_PFX_DD) ? "s->ix"
                                 : (in->prefix==Z80_PFX_FD) ? "s->iy" : "z80_hl(s)";
                 uint16_t cont;
-                if (in->opcode==0xE9 && G_TR && trace_computed_call(G_TR, addr, &cont) && tr_has(cont))
+                if (in->opcode==0xE9 && amb_by_jp(addr) >= 0){
+                    /* path-dependent push (G_AMB_*): computed call only if this path pushed */
+                    fprintf(o,"        if (s->sp == _ccsp_%04X) { _ccsp_%04X = 0xFFFF;", addr, addr);
+                    trace_computed_call(G_TR, addr, &cont);
+                    if (tr_has(cont))
+                        fprintf(o," uint16_t _csp = (uint16_t)(s->sp + 2); call_by_address(%s); if ((int16_t)(s->sp - _csp) > 0) return; if (s->sp != _csp) sms_call_unbalanced(0x%04X); goto L_%04X; }\n", idx, addr, cont);
+                    else
+                        fprintf(o," uint16_t _csp = (uint16_t)(s->sp + 2); call_by_address(%s); if ((int16_t)(s->sp - _csp) > 0) return; if (s->sp != _csp) sms_call_unbalanced(0x%04X); call_by_address(0x%04X); return; }\n", idx, addr, cont);
+                    fprintf(o,"        else { call_by_address(%s); return; }   /* this path did not push: tail jump */\n", idx);
+                }
+                else if (in->opcode==0xE9 && G_TR && trace_computed_call(G_TR, addr, &cont) && tr_has(cont))
                     /* computed call: one return (cont) was pushed before jp(hl);
                      * expected post-return SP is the current SP + 2. If higher,
                      * the callee RET'd past us — propagate (see emit_call_target). */
@@ -858,6 +885,37 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
         }
     }
 
+    /* Path-dependent push-continuations (see G_AMB_PUSH). jp (hl): runtime-checked; other
+     * forms (jp T / jp cc,T with a pushed continuation) are only reported for now. */
+    G_NAMB = 0;
+    for (int k=0;k<tr.insn_count;k++){
+        const Z80Insn *in=&tr.insns[k].insn; uint16_t a=tr.insns[k].addr, ct, pa;
+        bool is_rj = (in->cf==Z80_CF_RET || in->cf==Z80_CF_RET_COND) && trace_ret_jump_push(&tr, a, &pa);
+        if (is_rj) ct = 0;
+        else if (!((in->cf==Z80_CF_JUMP || in->cf==Z80_CF_JUMP_COND) && trace_computed_call_push(&tr, a, &ct, &pa))) continue;
+        bool is_cc = is_rj || (in->cf==Z80_CF_JUMP && !in->has_target && in->opcode==0xE9);
+        if (!is_cc && !(in->has_target && !tr_has(in->target))) continue;   /* internal jump: continuation unused */
+        /* ambiguous = a label in (push, jump] that is entered from OUTSIDE [push, jump] (or from an
+         * unknown source, e.g. a continuation label): that path reached the jump without the push. */
+        bool amb=false;
+        for (int j=0;j<nlbl && !amb;j++){
+            if (!(lbl[j] > pa && lbl[j] <= a)) continue;
+            bool inside_only=true, any=false;
+            for (int q=0;q<tr.insn_count;q++){
+                const Z80Insn *jq=&tr.insns[q].insn;
+                if (!((jq->cf==Z80_CF_JUMP || jq->cf==Z80_CF_JUMP_COND) && jq->has_target && jq->target==lbl[j])) continue;
+                any=true;
+                if (tr.insns[q].addr < pa || tr.insns[q].addr > a) inside_only=false;
+            }
+            if (!any || !inside_only) amb=true;
+        }
+        if (!amb) continue;
+        if (is_cc){
+            if (G_NAMB < MAX_AMB){ G_AMB_PUSH[G_NAMB]=pa; G_AMB_JP[G_NAMB]=a; G_NAMB++; }
+        } else
+            fprintf(stderr,"[SmsRecomp] WARNING: path-dependent push-continuation (push $%04X, jump $%04X, cont $%04X) in %s not handled\n", pa, a, ct, fe->name);
+    }
+
     /* Execution must begin at the ENTRY address. Instructions are emitted in
      * address order, so when the trace contains code below the entry (backward
      * jumps, or the tracer following a jump into lower memory), the first
@@ -870,6 +928,7 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
     }
 
     fprintf(o,"void %s(void){\n    Z80State *s = &g_z80; (void)s;\n", fe->name);
+    for (int i=0;i<G_NAMB;i++) fprintf(o,"    uint16_t _ccsp_%04X = 0xFFFF;\n", G_AMB_JP[i]);
     fprintf(o,"    sms_enter(0x%04X);\n", fe->addr);
     if (tr.truncated)
         fprintf(o,"    /* NOTE: trace truncated (hit unmapped/illegal); body covers the\n"
@@ -904,6 +963,7 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
                 for(int j=k;j<=end;j++){
                     fprintf(o,"        { /* %04X %s */\n",tr.insns[j].addr,tr.insns[j].insn.text);
                     emit_op(o,&tr.insns[j].insn);
+                    emit_push_tag(o,tr.insns[j].addr);
                     fprintf(o,"        }\n");
                 }
                 fprintf(o,"        s->r = (uint8_t)((s->r & 0x80) | ((s->r + %d) & 0x7f));\n"
@@ -925,6 +985,7 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
         if (in->cf==Z80_CF_NONE){
             fprintf(o,"    {\n");
             emit_op(o,in);
+            emit_push_tag(o,a);
             fprintf(o,"    }\n");
             if (z80_is_blockio_single(in) && !tr_has((uint16_t)(a+in->length)))   /* run continues in the next entry */
                 fprintf(o,"    call_by_address(0x%04X); return;\n", (uint16_t)(a+in->length));
@@ -935,6 +996,7 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
     }
     fprintf(o,"}\n\n");
     G_BS = NULL;
+    G_NAMB = 0;
 
     free(lbl);
     trace_free(&tr);

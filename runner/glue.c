@@ -1315,6 +1315,8 @@ void sms_call_unbalanced(uint16_t at){
 
 /* ====================== lifecycle ====================== */
 uint8_t *glue_rom_image(size_t *size){ if (size) *size = g_rom_size; return g_rom; }
+const uint8_t *glue_sram_image(size_t *size){ if (size) *size = sizeof g_sram; return g_sram; }
+const char    *glue_save_path(void){ return g_sav_path; }
 
 bool glue_load_rom(const char *path){
     FILE *f = fopen(path, "rb");

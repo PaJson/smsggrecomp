@@ -89,6 +89,10 @@ bool trace_is_label(const TraceResult *t, uint16_t addr);
  * continuation). Used by both the tracer (to follow the continuation) and the
  * code generator (to emit `call_by_address(...); goto L_cont;`). */
 bool trace_computed_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr);
+/* Same, also returning the address of the `push` that put the continuation on the stack
+ * (callers use it to detect a path-dependent push: a label between push and jp means some
+ * paths reach the jp WITHOUT the push, e.g. Golvellius `$3D50 jr z,$3D60` skipping `$3D59 push bc`). */
+bool trace_computed_call_push(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr, uint16_t *push_addr);
 
 /* Trampoline call: `ld rr,cont ; ... ; jp T` where the code at T begins with `push rr`
  * (a shared trampoline that pushes the caller-supplied continuation, e.g. Phantasy
@@ -107,6 +111,11 @@ static inline bool z80_is_blockio_single(const Z80Insn *in){
  * pushed address. Returns true for that idiom; *has_cont is set (and *cont_addr valid) when a second
  * pushed `ld rr,nn16` continuation sits below it (a computed call whose target `ret`s to cont). */
 bool trace_ret_jump(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont);
+/* The pushed target of such a RET when it is a constant (`ld rr,nn16 ; push rr`); discovery
+ * registers it as a function entry. */
+bool trace_ret_jump_target(const TraceResult *t, uint16_t ret_addr, uint16_t *tgt_addr);
+/* Address of the `push` of the jump target (to detect a path-dependent push, see code_generator). */
+bool trace_ret_jump_push(const TraceResult *t, uint16_t ret_addr, uint16_t *push_addr);
 
 /* `ld rr,cont ; push rr ; call F` where F drops its own return address (`pop hl ; ret`) so
  * its RET resumes at `cont` (Phantasy Star LABEL_787B). After the call, SP == pre-call SP + 2

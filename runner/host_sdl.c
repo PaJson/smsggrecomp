@@ -233,15 +233,62 @@ static void host_pace(void){
     }
 }
 
+/* ---- side panel (hud.h): widescreen layout = game picture at 3x + HUD_PANEL_W x HUD_PANEL_H ---- */
+static SDL_Texture *g_panel_tex;
+static uint32_t     g_panel_buf[HUD_PANEL_W * HUD_PANEL_H];
+static bool         g_panel_on;
+static void panel_layout(bool on){
+    int lw = on ? g_src.w * 3 + HUD_PANEL_W : g_src.w, lh = on ? g_src.h * 3 : g_src.h;
+    if (on && !g_panel_tex)
+        g_panel_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, HUD_PANEL_W, HUD_PANEL_H);
+    SDL_RenderSetLogicalSize(g_ren, lw, lh);
+    /* keep the window height, adapt the width (not when maximized / fullscreen: letterboxed) */
+    Uint32 wf = SDL_GetWindowFlags(g_win);
+    if (!(wf & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP))){
+        int ww, wh; SDL_GetWindowSize(g_win, &ww, &wh);
+        SDL_SetWindowSize(g_win, wh * lw / lh, wh);
+    }
+    g_panel_on = on;
+}
+/* test: SMS_WINDOW_SHOT=<file.ppm> [SMS_WINDOW_SHOT_FRAME=n] writes the composed window of the n-th
+ * presented frame (default 1) as a PPM (works with --hidden) */
+static void window_shot(void){
+    static long n = -1, target = 1; static const char *path;
+    if (n < 0){ path = getenv("SMS_WINDOW_SHOT"); const char *f = getenv("SMS_WINDOW_SHOT_FRAME"); if (f) target = atol(f); n = 0; }
+    if (!path || ++n != target) return;
+    int w, h; if (SDL_GetRendererOutputSize(g_ren, &w, &h) != 0 || w <= 0 || h <= 0) return;
+    uint32_t *px = (uint32_t*)malloc((size_t)w * (size_t)h * 4); if (!px) return;
+    if (SDL_RenderReadPixels(g_ren, NULL, SDL_PIXELFORMAT_ARGB8888, px, w * 4) == 0){
+        FILE *f = fopen(path, "wb");
+        if (f){
+            fprintf(f, "P6\n%d %d\n255\n", w, h);
+            for (int i = 0; i < w * h; i++){ uint8_t c[3] = { (uint8_t)(px[i] >> 16), (uint8_t)(px[i] >> 8), (uint8_t)px[i] }; fwrite(c, 1, 3, f); }
+            fclose(f);
+        }
+    }
+    free(px);
+}
+
 bool host_present(const uint32_t *fb, int fb_w, int fb_h){
 #ifdef SMS_GPU
     if(g_gpu)host_gl_present(vdp_frame_jobs());else
 #endif
     {
     if (!g_tex) return false;
+    bool panel = hud_panel_active();
+    if (panel != g_panel_on) panel_layout(panel);
     SDL_UpdateTexture(g_tex, NULL, fb, fb_w * (int)sizeof(uint32_t));
     SDL_RenderClear(g_ren);
-    SDL_RenderCopy(g_ren, g_tex, &g_src, NULL);
+    if (panel && g_panel_tex){
+        SDL_Rect game = { 0, 0, g_src.w * 3, g_src.h * 3 }, side = { g_src.w * 3, 0, HUD_PANEL_W, HUD_PANEL_H };
+        if (side.h != game.h) side.h = game.h;
+        SDL_RenderCopy(g_ren, g_tex, &g_src, &game);
+        hud_panel_render(g_panel_buf, HUD_PANEL_W, HUD_PANEL_H);
+        SDL_UpdateTexture(g_panel_tex, NULL, g_panel_buf, HUD_PANEL_W * (int)sizeof(uint32_t));
+        SDL_RenderCopy(g_ren, g_panel_tex, NULL, &side);
+    } else
+        SDL_RenderCopy(g_ren, g_tex, &g_src, NULL);
+    window_shot();
     SDL_RenderPresent(g_ren);
     }
     (void)fb_h;
@@ -324,6 +371,8 @@ void host_shutdown(void){
     host_gl_shutdown();
 #endif
     g_gpu=false;
+    if (g_panel_tex) SDL_DestroyTexture(g_panel_tex);
+    g_panel_tex = NULL; g_panel_on = false;
     if (g_tex) SDL_DestroyTexture(g_tex);
     if (g_ren) SDL_DestroyRenderer(g_ren);
     if (g_win) SDL_DestroyWindow(g_win);

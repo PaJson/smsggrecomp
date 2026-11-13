@@ -91,6 +91,34 @@ int hud_text(uint32_t *fb, int w, int h, int x, int y, const char *s, uint32_t a
     return x;
 }
 
+int hud_text_scaled(uint32_t *fb, int w, int h, int x, int y, const char *s, uint32_t argb, int k){
+    if (k <= 1) return hud_text(fb, w, h, x, y, s, argb);
+    for (; *s; s++, x += 6 * k){
+        int c = (unsigned char)*s;
+        if (c >= 'a' && c <= 'z') c -= 32;
+        if (c < 32 || c > 95) c = '?';
+        const uint8_t *g = k_font[c - 32];
+        for (int r = 0; r < 7 * k; r++)
+            for (int b = 0; b < 5 * k; b++)
+                if (g[r / k] & (0x10 >> (b / k))){
+                    int px = x + b, py = y + r;
+                    if (px >= 0 && py >= 0 && px < w && py < h) fb[py * w + px] = argb;
+                }
+    }
+    return x;
+}
+
+/* ---- side panel ---- */
+static HudPanelDraw s_panel_draw;
+static bool         s_panel_on;
+void hud_set_panel(HudPanelDraw draw){ s_panel_draw = draw; }
+void hud_set_panel_enabled(bool on){ s_panel_on = on; }
+bool hud_panel_active(void){ return s_panel_draw && s_panel_on; }
+void hud_panel_render(uint32_t *buf, int w, int h){
+    if (s_panel_draw) s_panel_draw(buf, w, h);
+    else for (int i = 0; i < w * h; i++) buf[i] = 0xFF000000u;
+}
+
 /* ---- state ---- */
 static const char      *s_title = "SETTINGS";
 static const HudOption *s_opts;

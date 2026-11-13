@@ -52,5 +52,18 @@ void hud_draw(uint32_t *fb, int w, int h);           /* draw over an ARGB frame 
 /* Draw `text` (5x7 font, 6 px advance) at (x,y) in `argb`; returns the end x. Usable by games
  * that want to draw their own panels. */
 int  hud_text(uint32_t *fb, int w, int h, int x, int y, const char *text, uint32_t argb);
+/* Same font scaled by `scale` (2 = 10x14 glyphs, 12 px advance). */
+int  hud_text_scaled(uint32_t *fb, int w, int h, int x, int y, const char *text, uint32_t argb, int scale);
+
+/* Side panel (widescreen layout, SDL window): when a game registers a panel and enables it, the
+ * window becomes 16:9: the game picture (3x) on the left, an HUD_PANEL_W x HUD_PANEL_H ARGB image
+ * drawn by `draw` on the right (redrawn every presented frame, also while the HUD is open). */
+#define HUD_PANEL_W 256
+#define HUD_PANEL_H 576
+typedef void (*HudPanelDraw)(uint32_t *buf, int w, int h);
+void hud_set_panel(HudPanelDraw draw);
+void hud_set_panel_enabled(bool on);
+bool hud_panel_active(void);                          /* registered and enabled */
+void hud_panel_render(uint32_t *buf, int w, int h);   /* host: fill the panel image */
 
 #endif

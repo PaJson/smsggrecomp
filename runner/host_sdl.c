@@ -245,8 +245,15 @@ static void panel_layout(bool on){
     /* keep the window height, adapt the width (not when maximized / fullscreen: letterboxed) */
     Uint32 wf = SDL_GetWindowFlags(g_win);
     if (!(wf & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP))){
-        int ww, wh; SDL_GetWindowSize(g_win, &ww, &wh);
+        int ww, wh, wx, wy; SDL_GetWindowSize(g_win, &ww, &wh);
         SDL_SetWindowSize(g_win, wh * lw / lh, wh);
+        /* keep the wider window on its display */
+        SDL_Rect ub; int d = SDL_GetWindowDisplayIndex(g_win);
+        SDL_GetWindowPosition(g_win, &wx, &wy);
+        if (d >= 0 && SDL_GetDisplayUsableBounds(d, &ub) == 0 && wx + wh * lw / lh > ub.x + ub.w){
+            int nx = ub.x + ub.w - wh * lw / lh; if (nx < ub.x) nx = ub.x;
+            SDL_SetWindowPosition(g_win, nx, wy);
+        }
     }
     g_panel_on = on;
 }
@@ -310,6 +317,12 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
         }
         /* ---- settings HUD (hud.c): F1 / pad Back toggles; while open it owns the keys ---- */
         else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F1){ if (!e.key.repeat) hud_toggle(); }
+        /* F11 or Alt+Enter: fullscreen (desktop resolution, letterboxed) <-> window */
+        else if (e.type == SDL_KEYDOWN && !e.key.repeat && (e.key.keysym.sym == SDLK_F11
+                 || (e.key.keysym.sym == SDLK_RETURN && (e.key.keysym.mod & KMOD_ALT)))){
+            bool fs = (SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+            SDL_SetWindowFullscreen(g_win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+        }
         else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK) hud_toggle();
         else if (hud_is_open() && e.type == SDL_KEYDOWN){
             if (e.key.repeat) continue;                 /* own repeat timer (nav_tick) */

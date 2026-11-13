@@ -1,4 +1,6 @@
 #include "z80.h"
+#include <stdint.h>
+uint8_t sms_test_r(uint8_t real);   /* smsggrecomp runner (glue.c) */
 
 // MARK: timings
 static const uint8_t cyc_00[256] = {4, 10, 7, 6, 4, 4, 7, 4, 4, 11, 7, 6, 4, 4,
@@ -1559,7 +1561,7 @@ void exec_opcode_ed(z80* const z, uint8_t opcode) {
     break; // ld a,i
 
   case 0x5F:
-    z->a = z->r;
+    z->a = sms_test_r(z->r); /* smsggrecomp: test hook (SMS_FIXED_R), identity by default */
     z->sf = z->a >> 7;
     z->zf = z->a == 0;
     z->hf = 0;

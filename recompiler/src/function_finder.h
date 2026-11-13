@@ -70,6 +70,7 @@ typedef struct {
     TracedInsn *insns;  int insn_count, insn_cap;
     uint16_t   *labels; int label_count, label_cap;   /* internal jump targets */
     bool        truncated;                              /* hit unmapped/illegal */
+    const SmsRom *rom; int bank;                        /* set by trace_function (for look-ahead at jump targets) */
 } TraceResult;
 
 /* Trace one function body from `start`, following fall-through and intra-
@@ -89,6 +90,29 @@ bool trace_is_label(const TraceResult *t, uint16_t addr);
  * code generator (to emit `call_by_address(...); goto L_cont;`). */
 bool trace_computed_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr);
 
+/* Trampoline call: `ld rr,cont ; ... ; jp T` where the code at T begins with `push rr`
+ * (a shared trampoline that pushes the caller-supplied continuation, e.g. Phantasy
+ * Star's `ld hl,+ ; jp $851C`). Semantically a call to T whose `ret` resumes at cont.
+ * Returns true and sets *cont_addr. Unlike trace_computed_call nothing is pushed
+ * before the jp, so the post-return SP equals the SP at the jp. */
+bool trace_trampoline_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr);
+
+/* Non-repeating block instructions LDI/LDD/INI/IND/OUTI/OUTD (ED A0 A8 A2 AA A3 AB). */
+static inline bool z80_is_blockio_single(const Z80Insn *in){
+    if (in->prefix!=Z80_PFX_ED) return false;
+    switch (in->opcode){ case 0xA0: case 0xA8: case 0xA2: case 0xAA: case 0xA3: case 0xAB: return true; default: return false; }
+}
+
+/* `push rr ; ... ; ret`: a plain RET with an unmatched push in its block is a computed JUMP to the
+ * pushed address. Returns true for that idiom; *has_cont is set (and *cont_addr valid) when a second
+ * pushed `ld rr,nn16` continuation sits below it (a computed call whose target `ret`s to cont). */
+bool trace_ret_jump(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont);
+
+/* `ld rr,cont ; push rr ; call F` where F drops its own return address (`pop hl ; ret`) so
+ * its RET resumes at `cont` (Phantasy Star LABEL_787B). After the call, SP == pre-call SP + 2
+ * means exactly that: execution continues at cont in this function. */
+bool trace_push_call(const TraceResult *t, uint16_t call_addr, uint16_t *cont_addr);
+
 /* ---- per-slot bank tracking (shared by discovery + codegen) -------------- *
  * Linear (address-order) inference of which ROM bank is mapped into each 16 KB
  * slot, by recognising the `ld a,#n ; ld ($FFFD/$FFFE/$FFFF),a` mapper idiom.
@@ -100,6 +124,8 @@ typedef struct {
     bool known[3];     /* slot bank statically established (else defer targets) */
     int  a_known;      /* statically-known value of register A (0..255), or -1 *
                         * if A's value is not statically determinable here.     */
+    int  hl_known;     /* HL as set by an immediately preceding `ld hl,nn`, or -1.
+                        * Only used for `ld hl,$FFFx ; ld (hl),n|a` mapper writes. */
 } BankState;
 
 void bankstate_init(BankState *bs, uint16_t entry, int entry_bank);

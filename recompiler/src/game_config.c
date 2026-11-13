@@ -41,7 +41,8 @@ bool game_config_load(const char *path, GameConfig *out){
     if (game){
         toml_datum_t d;
         d = toml_string_in(game,"output_prefix"); if (d.ok){ copy_str(out->output_prefix,sizeof(out->output_prefix),d.u.s); free(d.u.s); }
-        d = toml_string_in(game,"rom");           if (d.ok){ copy_str(out->rom_path,sizeof(out->rom_path),d.u.s); free(d.u.s); }
+        d = toml_string_in(game,"display_name");  if (d.ok){ copy_str(out->display_name,sizeof(out->display_name),d.u.s); free(d.u.s); }
+        d = toml_string_in(game,"rom");         if (d.ok){ copy_str(out->rom_path,sizeof(out->rom_path),d.u.s); free(d.u.s); }
         d = toml_string_in(game,"platform");      if (d.ok){ out->platform = (strcmp(d.u.s,"gg")==0)?SMS_PLATFORM_GG:SMS_PLATFORM_SMS; free(d.u.s); }
         d = toml_int_in(game,"crc32");            if (d.ok){ out->have_crc=true; out->crc32=(uint32_t)d.u.i; }
     }
@@ -54,11 +55,20 @@ bool game_config_load(const char *path, GameConfig *out){
         d = toml_int_in(rl,"player_object"); if (d.ok) out->player_object_addr=(uint32_t)d.u.i;
     }
 
+    toml_table_t *hk = toml_table_in(root, "hooks");
+    if (hk){
+        toml_datum_t d;
+        d = toml_string_in(hk,"on_post_reset"); if (d.ok){ copy_str(out->hook_on_post_reset,sizeof(out->hook_on_post_reset),d.u.s); free(d.u.s); }
+        d = toml_string_in(hk,"on_frame_pre");  if (d.ok){ copy_str(out->hook_on_frame_pre,sizeof(out->hook_on_frame_pre),d.u.s); free(d.u.s); }
+        d = toml_string_in(hk,"on_frame_post"); if (d.ok){ copy_str(out->hook_on_frame_post,sizeof(out->hook_on_frame_post),d.u.s); free(d.u.s); }
+    }
+
     toml_table_t *mp = toml_table_in(root, "mapper");
     if (mp){ toml_datum_t d = toml_string_in(mp,"kind"); if (d.ok){ copy_str(out->mapper_kind,sizeof(out->mapper_kind),d.u.s); free(d.u.s); } }
 
     toml_table_t *fn = toml_table_in(root, "functions");
     load_int_array(fn, "extra",     out->extra,     &out->extra_count,     GC_MAX_FUNCS);
+    load_int_array(fn, "banked",    out->banked,    &out->banked_count,    GC_MAX_FUNCS);
     load_int_array(fn, "blacklist", out->blacklist, &out->blacklist_count, GC_MAX_FUNCS);
 
     toml_table_t *jt = toml_table_in(root, "jump_tables");
@@ -66,6 +76,7 @@ bool game_config_load(const char *path, GameConfig *out){
         toml_array_t *aa = toml_array_in(jt, "addr");
         toml_array_t *ba = toml_array_in(jt, "bank");
         toml_array_t *ca = toml_array_in(jt, "count");
+        toml_array_t *pa = toml_array_in(jt, "page");
         int n = aa ? toml_array_nelem(aa) : 0;
         for (int i=0;i<n && out->jt_n<64;i++){
             toml_datum_t da = toml_int_at(aa, i);
@@ -74,8 +85,29 @@ bool game_config_load(const char *path, GameConfig *out){
             out->jt_addr[k]  = (uint16_t)da.u.i;
             out->jt_bank[k]  = -1;
             out->jt_count[k] = 0;
+            out->jt_page[k]  = -1;
+            if (pa){ toml_datum_t dp = toml_int_at(pa, i); if (dp.ok) out->jt_page[k] = (int)dp.u.i; }
             if (ba){ toml_datum_t db = toml_int_at(ba, i); if (db.ok) out->jt_bank[k]  = (int)db.u.i; }
             if (ca){ toml_datum_t dc = toml_int_at(ca, i); if (dc.ok) out->jt_count[k] = (int)dc.u.i; }
+        }
+    }
+
+    toml_table_t *ih = toml_table_in(root, "insn_hooks");
+    if (ih){
+        toml_array_t *aa = toml_array_in(ih, "addr");
+        toml_array_t *fa = toml_array_in(ih, "func");
+        toml_array_t *ra = toml_array_in(ih, "resume");
+        toml_array_t *ba = toml_array_in(ih, "bank");
+        int n = aa ? toml_array_nelem(aa) : 0;
+        for (int i=0;i<n && out->ih_n<64;i++){
+            toml_datum_t da = toml_int_at(aa, i);
+            toml_datum_t df = fa ? toml_string_at(fa, i) : (toml_datum_t){0};
+            toml_datum_t dr = ra ? toml_int_at(ra, i) : (toml_datum_t){0};
+            if (!da.ok || !df.ok || !dr.ok){ fprintf(stderr,"[cfg] [insn_hooks] entry %d needs addr, func and resume\n", i); if (df.ok) free(df.u.s); continue; }
+            int k = out->ih_n++;
+            out->ih_addr[k] = (uint16_t)da.u.i; out->ih_resume[k] = (uint16_t)dr.u.i; out->ih_bank[k] = -1;
+            copy_str(out->ih_func[k], sizeof(out->ih_func[k]), df.u.s); free(df.u.s);
+            if (ba){ toml_datum_t db = toml_int_at(ba, i); if (db.ok) out->ih_bank[k] = (int)db.u.i; }
         }
     }
 

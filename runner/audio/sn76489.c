@@ -296,6 +296,9 @@ static void sn_render_block(SN76489 *p,int16_t *out,size_t frames)
 }
 #endif
 
+static void (*s_aux_mix)(int16_t *frames, size_t n);
+void psg_set_aux_mixer(void (*mix)(int16_t *frames, size_t n)){ s_aux_mix = mix; }
+
 void psg_init(void)
 {
     sn_reset(&s_sn);
@@ -328,6 +331,7 @@ void psg_advance(uint32_t cycles_z80)
 #else
         sn_render_block(&s_sn,&s_scratch[s_scratch_write*2],chunk);
 #endif
+        if (s_aux_mix) s_aux_mix(&s_scratch[s_scratch_write * 2], chunk);
         s_scratch_write += chunk;
         frames_to_emit  -= chunk;
     }

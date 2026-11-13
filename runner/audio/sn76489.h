@@ -15,6 +15,10 @@
 
 void   psg_init(void);
 
+/* Optional aux mixer (e.g. the YM2413 FM unit): called after each block of PSG frames is
+ * synthesised, with the block's interleaved stereo S16 frames, so it can add/mute in place. */
+void   psg_set_aux_mixer(void (*mix)(int16_t *frames, size_t n));
+
 /* Advance the PSG by `cycles_z80` Z80 T-states, synthesising whole stereo
  * frames into the internal scratch (one frame per 16 T-states). Sub-frame
  * remainder is accumulated, so calling this with small deltas is exact. */

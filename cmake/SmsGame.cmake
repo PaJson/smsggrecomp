@@ -17,6 +17,7 @@ function(sms_add_game TARGET)
     option(SMSGG_ENABLE_SDL "Build the interactive SDL2 host" ON)
     option(SMSGG_ENABLE_GPU "Enable faithful GPU internal resolution" ON)
     option(SMSGG_NATIVE_EXECUTION "Use qualified native CPU and PSG jobs" ON)
+    option(SMSGG_NATIVE_SPANS "Fuse straight-line instruction spans in native builds" ON)
     option(SMSGG_REFERENCE_VDP "Use the scalar reference VDP" OFF)
     set(SMSGG_OPTIMIZATION "O2" CACHE STRING "Native compiler optimization")
     set_property(CACHE SMSGG_OPTIMIZATION PROPERTY STRINGS O1 O2 O3)
@@ -48,14 +49,17 @@ function(sms_add_game TARGET)
     endif()
     add_executable(${TARGET} ${_sources}
         "${_engine}/runner/main.c" "${_engine}/runner/glue.c"
-        "${_engine}/runner/coverage_route.c"
-        "${_engine}/runner/video/sms_vdp.c" "${_engine}/runner/audio/sn76489.c"
+        "${_engine}/runner/coverage_route.c" "${_engine}/runner/hud.c"
+        "${_engine}/runner/video/sms_vdp.c" "${_engine}/runner/audio/sn76489.c" "${_engine}/runner/audio/ym2413.c" "${_engine}/runner/audio/emu2413.c"
         "${_engine}/runner/external/superzazu/z80.c")
     target_compile_features(${TARGET} PRIVATE c_std_11)
     target_compile_definitions(${TARGET} PRIVATE SMSGG_HAVE_GAME_LAYOUT)
     target_compile_options(${TARGET} PRIVATE "$<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-${SMSGG_OPTIMIZATION}>")
     if(SMSGG_NATIVE_EXECUTION)
-        target_compile_definitions(${TARGET} PRIVATE SMS_NATIVE_HOOKS SMS_NATIVE_DISPATCH SMS_NATIVE_EVENTS SMS_NATIVE_SPANS)
+        target_compile_definitions(${TARGET} PRIVATE SMS_NATIVE_HOOKS SMS_NATIVE_DISPATCH SMS_NATIVE_EVENTS)
+        if(SMSGG_NATIVE_SPANS)
+            target_compile_definitions(${TARGET} PRIVATE SMS_NATIVE_SPANS)
+        endif()
     else()
         target_compile_definitions(${TARGET} PRIVATE SMS_PSG_REFERENCE)
     endif()

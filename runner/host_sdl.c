@@ -14,6 +14,7 @@
 #include <SDL.h>
 #include "host_sdl.h"
 #include "glue.h"       /* SMS_PAD_* bit constants (the controller contract) */
+#include "hud.h"        /* settings overlay: the host forwards keys to it */
 #ifdef SMS_GPU
 #include "host_gl.h"
 #endif
@@ -52,6 +53,8 @@ bool host_dump_gpu(const char *p){
 #endif
 }
 
+static void pad_open(int idx);   /* game controllers, see below */
+
 bool host_init(int fb_w, int fb_h,
                int crop_x, int crop_y, int crop_w, int crop_h,
                int scale, const char *title){
@@ -59,6 +62,9 @@ bool host_init(int fb_w, int fb_h,
     if (SDL_Init(SDL_INIT_VIDEO) != 0){
         fprintf(stderr, "[host] SDL_Init failed: %s\n", SDL_GetError());
         return false;
+    }
+    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) == 0){     /* pads present at start-up; hot-plug via events */
+        for (int i = 0; i < SDL_NumJoysticks(); i++) pad_open(i);
     }
     if (scale < 1) scale = 1;
     g_work_count=0;g_work_start=0;
@@ -118,7 +124,31 @@ static uint8_t key_to_pad(SDL_Keycode k){
     }
 }
 
-uint8_t host_get_pad1(void){ return g_pad; }
+/* Game controllers (SDL GameController API: Xbox/PlayStation/Switch-style pads, any SDL mapping).
+ * D-pad or left stick = D-pad; A/X (south/west) = button 1, B/Y (east/north) = button 2;
+ * Start = Start; right shoulder or right trigger held = x4 turbo (like TAB). All pads drive P1. */
+static uint8_t g_pad_btn, g_pad_axis;   /* masks from controller buttons / left stick */
+static bool    g_pad_turbo;
+static void pad_open(int idx){
+    if (SDL_IsGameController(idx)){
+        SDL_GameController *gc = SDL_GameControllerOpen(idx);
+        if (gc) fprintf(stderr, "[host] gamepad: %s\n", SDL_GameControllerName(gc));
+    }
+}
+static uint8_t pad_button(Uint8 b){
+    switch (b){
+        case SDL_CONTROLLER_BUTTON_DPAD_UP:    return SMS_PAD_UP;
+        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  return SMS_PAD_DOWN;
+        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:  return SMS_PAD_LEFT;
+        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return SMS_PAD_RIGHT;
+        case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_X: return SMS_PAD_B1;
+        case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_Y: return SMS_PAD_B2;
+        case SDL_CONTROLLER_BUTTON_START:      return SMS_PAD_START;
+        default: return 0;
+    }
+}
+
+uint8_t host_get_pad1(void){ return (uint8_t)(g_pad | g_pad_btn | g_pad_axis); }
 
 /* ---- wall-clock frame limiter ----
  * Deadline-advance model: the deadline moves forward by exactly one frame period
@@ -134,15 +164,22 @@ void host_set_frame_cap(double fps){
     g_deadline      = 0;           /* re-anchored on the next present */
 }
 
+/* Speed control: `--speed N` scales the frame cap; holding TAB is a turbo (x4). Both skip audio
+* (host_fast_forward()) so the sound queue does not run away. */
+static double g_speed = 1.0;
+static bool   g_turbo;
+void host_set_speed(double mult){ g_speed = (mult > 0.05) ? mult : 1.0; g_deadline = 0; }
+bool host_fast_forward(void){ return g_turbo || g_pad_turbo || g_speed > 1.001 || g_speed < 0.999; }
 static void host_pace(void){
     if (g_period_counts <= 0.0) return;
+    double sp = (g_turbo || g_pad_turbo) ? 4.0 : g_speed;
     uint64_t now = SDL_GetPerformanceCounter();
     if (g_deadline == 0) g_deadline = now;                 /* first frame: anchor */
-    g_deadline += (uint64_t)g_period_counts;
+    g_deadline += (uint64_t)(g_period_counts / sp);
     /* If we fell far behind (debugger pause, hitch), resync instead of bursting
      * to catch up. */
     if (now > g_deadline + (uint64_t)(g_period_counts * 4.0))
-        g_deadline = now + (uint64_t)g_period_counts;
+        g_deadline = now + (uint64_t)(g_period_counts / sp);
     for (;;){
         now = SDL_GetPerformanceCounter();
         if (now >= g_deadline) break;
@@ -168,10 +205,59 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
     SDL_Event e;
     while (SDL_PollEvent(&e)){
         if (e.type == SDL_QUIT) quit = true;
+        else if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_CLOSE){
+            /* A game-owned auxiliary window (tagged with window data "aux", e.g. the auto-map)
+             * just hides itself; closing the main window quits. */
+            SDL_Window *cw = SDL_GetWindowFromID(e.window.windowID);
+            if (cw && SDL_GetWindowData(cw, "aux")) SDL_HideWindow(cw);
+            else quit = true;
+        }
+        else if (e.type == SDL_CONTROLLERDEVICEADDED) pad_open(e.cdevice.which);
+        /* ---- settings HUD (hud.c): F1 / pad Back toggles; while open it owns the keys ---- */
+        else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F1){ hud_key(HUD_KEY_TOGGLE); g_pad = 0; g_pad_btn = 0; g_pad_axis = 0; }
+        else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK){ hud_key(HUD_KEY_TOGGLE); g_pad = 0; g_pad_btn = 0; g_pad_axis = 0; }
+        else if (hud_is_open() && e.type == SDL_KEYDOWN){
+            switch (e.key.keysym.sym){
+                case SDLK_UP: hud_key(HUD_KEY_UP); break;        case SDLK_DOWN: hud_key(HUD_KEY_DOWN); break;
+                case SDLK_LEFT: hud_key(HUD_KEY_LEFT); break;    case SDLK_RIGHT: hud_key(HUD_KEY_RIGHT); break;
+                case SDLK_ESCAPE: case SDLK_RETURN: case SDLK_z: case SDLK_x: hud_key(HUD_KEY_CLOSE); break;
+                default: break;
+            }
+        }
+        else if (hud_is_open() && e.type == SDL_CONTROLLERBUTTONDOWN){
+            switch (e.cbutton.button){
+                case SDL_CONTROLLER_BUTTON_DPAD_UP: hud_key(HUD_KEY_UP); break;
+                case SDL_CONTROLLER_BUTTON_DPAD_DOWN: hud_key(HUD_KEY_DOWN); break;
+                case SDL_CONTROLLER_BUTTON_DPAD_LEFT: hud_key(HUD_KEY_LEFT); break;
+                case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: hud_key(HUD_KEY_RIGHT); break;
+                case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_START: hud_key(HUD_KEY_CLOSE); break;
+                default: break;
+            }
+        }
+        else if (hud_is_open() && (e.type == SDL_KEYUP || e.type == SDL_CONTROLLERBUTTONUP || e.type == SDL_CONTROLLERAXISMOTION)){
+            /* swallowed while the HUD is open */
+        }
+        else if (e.type == SDL_CONTROLLERBUTTONDOWN){
+            if (e.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) g_pad_turbo = true;
+            else g_pad_btn |= pad_button(e.cbutton.button);
+        } else if (e.type == SDL_CONTROLLERBUTTONUP){
+            if (e.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) g_pad_turbo = false;
+            else g_pad_btn &= (uint8_t)~pad_button(e.cbutton.button);
+        } else if (e.type == SDL_CONTROLLERAXISMOTION){
+            const int dz = 12000; int v = e.caxis.value;
+            if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX)
+                g_pad_axis = (uint8_t)((g_pad_axis & ~(SMS_PAD_LEFT|SMS_PAD_RIGHT)) | (v < -dz ? SMS_PAD_LEFT : v > dz ? SMS_PAD_RIGHT : 0));
+            else if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY)
+                g_pad_axis = (uint8_t)((g_pad_axis & ~(SMS_PAD_UP|SMS_PAD_DOWN)) | (v < -dz ? SMS_PAD_UP : v > dz ? SMS_PAD_DOWN : 0));
+            else if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
+                g_pad_turbo = v > 16000;
+        }
         else if (e.type == SDL_KEYDOWN){
             if (e.key.keysym.sym == SDLK_ESCAPE) quit = true;
+            else if (e.key.keysym.sym == SDLK_TAB) g_turbo = true;
             else g_pad |= key_to_pad(e.key.keysym.sym);
         } else if (e.type == SDL_KEYUP){
+            if (e.key.keysym.sym == SDLK_TAB) g_turbo = false;
             g_pad &= (uint8_t)~key_to_pad(e.key.keysym.sym);
         }
     }
@@ -198,6 +284,9 @@ void host_shutdown(void){
 /* ---- audio ---- */
 static SDL_AudioDeviceID g_adev;
 static SDL_AudioStream  *g_astream;   /* PSG src_rate stereo -> device rate */
+static uint32_t g_audio_src_rate;
+static int      g_audio_cur_rate;
+static int      g_audio_dev_rate = 48000;
 
 bool host_audio_init(uint32_t src_rate){
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0){
@@ -224,14 +313,32 @@ bool host_audio_init(uint32_t src_rate){
         SDL_CloseAudioDevice(g_adev); g_adev = 0;
         return false;
     }
+    g_audio_src_rate = src_rate; g_audio_cur_rate = (int)src_rate; g_audio_dev_rate = have.freq;
     SDL_PauseAudioDevice(g_adev, 0);       /* start playback */
     fprintf(stderr, "[host] audio: PSG %u Hz -> device %d Hz stereo\n",
             src_rate, have.freq);
     return true;
 }
 
+/* Audio follows the emulation speed (TAB turbo = x4, --speed N): the same samples per frame are
+ * resampled as if they were recorded at src_rate*speed, so fast-forward plays pitched up instead of
+ * going silent, and the queue stays balanced. The stream is rebuilt whenever the speed changes. */
+static void audio_follow_speed(void){
+    double sp = (g_turbo || g_pad_turbo) ? 4.0 : g_speed;
+    int rate = (int)((double)g_audio_src_rate * sp + 0.5);
+    if (rate < 1000) rate = 1000;
+    if (rate == g_audio_cur_rate) return;
+    SDL_AudioStream *ns = SDL_NewAudioStream(AUDIO_S16SYS, 2, rate, AUDIO_S16SYS, 2, g_audio_dev_rate);
+    if (!ns) return;
+    if (g_astream) SDL_FreeAudioStream(g_astream);
+    g_astream = ns; g_audio_cur_rate = rate;
+    SDL_ClearQueuedAudio(g_adev);
+}
+
 void host_audio_submit(const int16_t *stereo_frames, size_t frame_count){
     if (!g_astream || !g_adev || frame_count == 0) return;
+    audio_follow_speed();
+    if (SDL_GetQueuedAudioSize(g_adev) > (uint32_t)(g_audio_dev_rate * 4 / 2)) return;   /* > 0.5 s queued: drop */
     SDL_AudioStreamPut(g_astream, stereo_frames,
                        (int)(frame_count * 2 * sizeof(int16_t)));
     int avail;

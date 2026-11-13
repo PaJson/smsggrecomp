@@ -20,8 +20,10 @@
 #include "external/superzazu/z80.h"
 #include "png_write.h"
 #include "audio/sn76489.h"
+#include "audio/ym2413.h"
 #ifdef SMSGG_HAVE_GAME_LAYOUT
 #include "game_spec.h"
+#include "hud.h"
 #endif
 
 #include <stdio.h>
@@ -40,12 +42,32 @@ static uint32_t  g_rom_crc;
 static uint8_t   g_ram[0x2000];     /* 8 KB system RAM ($C000-$DFFF) */
 static int       g_bank[3] = {0,1,2};
 static const uint8_t *g_rom_page[3];
+/* Cartridge (battery) RAM: $FFFC bit3 maps 16 KB of SRAM over slot 2 ($8000-$BFFF),
+ * bit2 picks which 16 KB page. Persisted to "<rom>.sav" (flushed when the game unmaps
+ * it, and at exit). Phantasy Star's save slots live here. */
+static z80 g_hz;
+static uint8_t   g_sram[0x8000];
+static uint8_t   g_cartctl;          /* last value written to $FFFC */
+static bool      g_sram_dirty;
+static char      g_sav_path[300];
+#ifdef SMS_NO_SRAM
+static inline bool sram_mapped(void){ return false; }
+#else
+static inline bool sram_mapped(void){ return (g_cartctl & 0x08) != 0; }
+#endif
+static inline uint8_t *sram_page(void){ return g_sram + ((g_cartctl & 0x04) ? 0x4000u : 0u); }
 static void set_bank(int slot,int bank){
     g_bank[slot]=bank;
     /* Whole-bank ROMs admit a direct window. Odd sizes retain exact byte
      * modulo behavior, including accesses across a partial final bank. */
     g_rom_page[slot]=(g_rom && g_rom_size && !(g_rom_size&0x3fff))
         ? g_rom+((size_t)(unsigned)bank*0x4000u)%g_rom_size : NULL;
+    if (slot==2 && sram_mapped()) g_rom_page[2]=sram_page();
+}
+void glue_sram_flush(void){
+    if (!g_sram_dirty || !g_sav_path[0]) return;
+    FILE *f=fopen(g_sav_path,"wb");
+    if (f){ fwrite(g_sram,1,sizeof g_sram,f); fclose(f); g_sram_dirty=false; }
 }
 static bool      g_mapper_cm;        /* Codemasters mapper */
 
@@ -368,7 +390,10 @@ uint8_t sms_read8(uint16_t a){
     if (a < 0x0400) return rom_byte(0, a);              /* fixed first 1 KB */
     if (a < 0x4000) return rom_byte(g_bank[0], a);
     if (a < 0x8000) return rom_byte(g_bank[1], (uint32_t)a - 0x4000);
-    if (a < 0xC000) return rom_byte(g_bank[2], (uint32_t)a - 0x8000);
+    if (a < 0xC000){
+        if (sram_mapped()) return sram_page()[a - 0x8000];
+        return rom_byte(g_bank[2], (uint32_t)a - 0x8000);
+    }
     return g_ram[(a - 0xC000) & 0x1FFF];
 }
 
@@ -396,12 +421,21 @@ void sms_write8(uint16_t a, uint8_t v){
         g_ram[(a - 0xC000) & 0x1FFF] = v;
         if (a >= 0xFFFC){                                /* Sega frame regs */
             switch (a){
-                case 0xFFFC: break;                      /* RAM/mapper control */
+                case 0xFFFC: {                           /* RAM/mapper control */
+                    bool was=sram_mapped();
+                    g_cartctl=v; set_bank(2,g_bank[2]);
+                    if (was && !sram_mapped()) glue_sram_flush();
+                    break; }
                 case 0xFFFD: set_bank(0,v); break;
                 case 0xFFFE: set_bank(1,v); break;
                 case 0xFFFF: set_bank(2,v); break;
             }
         }
+        return;
+    }
+    if (a >= 0x8000 && sram_mapped()){                   /* cartridge RAM write */
+        uint8_t *pg=sram_page();
+        if (pg[a - 0x8000] != v){ pg[a - 0x8000]=v; g_sram_dirty=true; }
         return;
     }
     if (g_mapper_cm){                                    /* Codemasters frame regs */
@@ -414,6 +448,52 @@ void sms_write8(uint16_t a, uint8_t v){
 
 int sms_slot_bank(uint16_t addr){
     return (addr < 0xC000) ? g_bank[addr >> 14] : -1;
+}
+
+/* ---- LD A,R value (test hook) ----
+ * Identity by default. With env SMS_FIXED_R=1 (lockstep tests only), LD A,R returns a value that
+ * depends only on how many times LD A,R has executed: R itself counts every instruction incl. busy-
+ * wait loops, so it differs between the recompiled build (interrupts at sync points) and the cycle-
+ * exact interpreter, and games that mix R into their RNG (Phantasy Star UpdateRNGSeed) would diverge
+ * for a reason that is not a recompiler bug. */
+static int g_fixed_r = -1;
+static uint32_t g_fixed_r_n;
+uint8_t sms_test_r(uint8_t real){
+    if (g_fixed_r < 0){ const char *e = getenv("SMS_FIXED_R"); g_fixed_r = (e && *e && *e != '0'); }
+    if (!g_fixed_r) return real;
+    uint32_t x = ++g_fixed_r_n * 2654435761u;
+    return (uint8_t)((x >> 24) & 0x7F);
+}
+
+/* ---- function coverage (env SMS_COVERAGE=<file>) ----
+ * Bitmap over (bank, addr) of every recompiled function entry executed; written at exit as
+ * lines "BANK ADDR" (hex; bank -1 for RAM). Used to aim test scenarios at code never run. */
+int g_cov_on;
+static uint8_t *g_cov_bits;              /* 256 banks x 16 KB, 1 bit each = 512 KB */
+static uint8_t  g_cov_ram[0x4000 / 8];
+static const char *g_cov_path;
+void sms_cov_hit(uint16_t addr){
+    if (addr >= 0xC000){ uint16_t o = (uint16_t)(addr - 0xC000); g_cov_ram[o >> 3] |= (uint8_t)(1u << (o & 7)); return; }
+    uint32_t o = ((uint32_t)(g_bank[addr >> 14] & 0xFF) << 14) | (addr & 0x3FFF);
+    g_cov_bits[o >> 3] |= (uint8_t)(1u << (o & 7));
+}
+static void cov_write(void){
+    FILE *f = fopen(g_cov_path, "w"); if (!f) return;
+    for (uint32_t o = 0; o < (256u << 14); o++)
+        if (g_cov_bits[o >> 3] & (1u << (o & 7))){
+            uint32_t bank = o >> 14, off = o & 0x3FFF;     /* off = address within the 16 KB bank */
+            fprintf(f, "%u %04X\n", bank, (unsigned)off);
+        }
+    for (uint32_t o = 0; o < 0x4000; o++)
+        if (g_cov_ram[o >> 3] & (1u << (o & 7))) fprintf(f, "-1 %04X\n", (unsigned)(0xC000 + o));
+    fclose(f);
+}
+static void cov_init(void){
+    const char *p = getenv("SMS_COVERAGE");
+    if (!p || !*p) return;
+    g_cov_bits = (uint8_t *)calloc((256u << 14) / 8, 1);
+    if (!g_cov_bits) return;
+    g_cov_path = p; g_cov_on = 1; atexit(cov_write);
 }
 
 uint8_t sms_io_in(uint8_t p){
@@ -433,6 +513,7 @@ uint8_t sms_io_in(uint8_t p){
         return vdp_vcounter();
     }
     if (p < 0xC0) return (p & 1) ? vdp_status_read() : vdp_data_read();
+    if ((p & 0xFC) == 0xF0) return fm_port_read(p);          /* FM detection: $F2 reads back */
     /* $C0-$FF controller ports, active low (0 = pressed). Even ($DC) = P1 D-pad
      * + buttons + P2 up/down; odd ($DD) = P2 left/right/buttons + reset/TH
      * (idle high). */
@@ -467,7 +548,18 @@ void sms_io_out(uint8_t p, uint8_t v){
         if (g_psg_log) fprintf(g_psg_log,"%llu,%u\n",(unsigned long long)g_z80.cyc,v);
         psg_write(v); return;
     }
-    if (p < 0xC0){ if (p & 1) vdp_control_write(v); else vdp_data_write(v); return; }
+    if ((p & 0xFC) == 0xF0){ fm_port_write(p, v); return; }      /* YM2413 FM unit: $F0 addr, $F1 data, $F2 control */
+    if (p < 0xC0){
+        static FILE *vl; static int vl_init;
+        if (!vl_init){ vl_init=1; const char *e=getenv("SMS_VDPLOG"); if (e) vl=fopen(e,"w"); }   /* diagnostic: port-write stream */
+        if (vl){
+            fprintf(vl,"%llu %02X %02X",(unsigned long long)g_frame,p,v);
+            { uint16_t sp=g_interpreter_only?g_hz.sp:g_z80.sp; fprintf(vl," pc=%04X sp:",g_dbg_pc);
+              for (int j=0;j<12;j++) fprintf(vl," %04X",(unsigned)(sms_read8((uint16_t)(sp+2*j))|(sms_read8((uint16_t)(sp+2*j+1))<<8))); }
+            if (p & 1){ fprintf(vl," <"); for (int j=1;j<=6 && g_enter_pos>=(uint32_t)j;j++) fprintf(vl," %04X", g_enter_ring[(g_enter_pos-j)&(SMS_ENTER_RING_SIZE-1)]); }
+            fprintf(vl,"\n");
+        }
+        if (p & 1) vdp_control_write(v); else vdp_data_write(v); return; }
     (void)v;                                             /* $C0-$FF controllers: no output */
 }
 
@@ -476,7 +568,13 @@ static void frame_completed(void){
     g_frame++;
     { static int armed=-1; if(armed<0){armed=getenv("SMS_IC_TRACE")?1:0;}
       if(armed) fprintf(stderr,"IC %llu %llu\n",(unsigned long long)g_frame,(unsigned long long)g_frame_ic); g_frame_ic=0; }
+#ifdef SMSGG_HAVE_GAME_LAYOUT
+    if (g_game_spec.on_frame_post) g_game_spec.on_frame_post(g_frame);   /* per-game hook: state of the frame just finished */
+#endif
     if (g_input_cb) g_pad1 = g_input_cb(g_frame);   /* scripted input for the upcoming frame */
+#ifdef SMSGG_HAVE_GAME_LAYOUT
+    if (g_game_spec.on_frame_pre) g_game_spec.on_frame_pre(g_frame);
+#endif
     if (g_boundary_cb && g_boundary_cb(g_frame) && g_running)
         longjmp(g_quit_env, 1);
     if (g_audio_sink){
@@ -505,6 +603,34 @@ static void frame_completed(void){
             for (int j=1;j<=40 && g_enter_pos>=(uint32_t)j;j++)
                 fprintf(stderr," %04X", g_enter_ring[(g_enter_pos-j)&(SMS_ENTER_RING_SIZE-1)]);
             fprintf(stderr,"\n");
+        }
+    }
+    {   /* lockstep state log (env SMS_STATE_LOG=<file>, SMS_STATE_EVERY=N, SMS_STATE_SKIP=lo-hi hex RAM
+         * range to leave out, e.g. the stack): every N frames one line "frame ram vram cram" (FNV-1a
+         * hashes). Diff the recompiled and --interp logs to find the first divergent frame. */
+        static int st_init; static FILE *st_f; static uint64_t st_every; static unsigned st_lo = 1, st_hi = 0;
+        if (!st_init){
+            st_init = 1;
+            const char *p = getenv("SMS_STATE_LOG");
+            if (p && *p){
+                st_f = fopen(p, "w");
+                const char *e = getenv("SMS_STATE_EVERY"); st_every = e ? strtoull(e, NULL, 0) : 60;
+                if (!st_every) st_every = 60;
+                const char *k = getenv("SMS_STATE_SKIP");
+                if (k){ unsigned lo, hi; if (sscanf(k, "%x-%x", &lo, &hi) == 2){ st_lo = lo; st_hi = hi; } }
+            }
+        }
+        if (st_f && g_frame % st_every == 0){
+            uint32_t hr = 2166136261u, hv = 2166136261u, hc = 2166136261u;
+            for (unsigned i = 0; i < sizeof g_ram; i++){
+                unsigned a = 0xC000 + i;
+                if (a >= st_lo && a <= st_hi) continue;
+                hr = (hr ^ g_ram[i]) * 16777619u;
+            }
+            for (int i = 0; i < 0x4000; i++) hv = (hv ^ g_vdp.vram[i]) * 16777619u;
+            for (unsigned i = 0; i < sizeof g_vdp.cram; i++) hc = (hc ^ g_vdp.cram[i]) * 16777619u;
+            fprintf(st_f, "%llu %08X %08X %08X\n", (unsigned long long)g_frame, hr, hv, hc);
+            fflush(st_f);
         }
     }
     if (g_dump_path && g_frame == g_dump_frame){
@@ -639,6 +765,10 @@ static void frame_completed(void){
             fprintf(stderr, "\n");
         }
         vdp_render_frame(g_fb);
+        if (getenv("SMS_HUD_SHOT")){      /* test: draw the settings HUD into the dumped frame */
+            if (!hud_is_open()) hud_key(HUD_KEY_TOGGLE);
+            hud_draw(g_fb, SMS_SCREEN_W, SMS_SCREEN_H);
+        }
         if (png_write_argb(g_dump_path, g_fb, SMS_SCREEN_W, SMS_SCREEN_H, SMS_SCREEN_W) == 0)
             fprintf(stderr, "[runner] dumped frame %llu -> %s\n",
                     (unsigned long long)g_frame, g_dump_path);
@@ -1086,6 +1216,13 @@ void sms_diff_enter(uint16_t addr){
                 do ii++; while (ii<g_strace_n && g_strace[ii].pc==pc);
             }
             if (!found) fprintf(stderr,"[diff]   streams matched through min length (r=%d i=%d) - divergence past trace window\n",g_rtrace_n,g_strace_n);
+            if (!found){   /* tails: where the shorter stream stopped, and what the longer one did */
+                fprintf(stderr,"[diff]   recomp tail:");
+                for(int j=(g_rtrace_n>8?g_rtrace_n-8:0);j<g_rtrace_n;j++) fprintf(stderr," %04X",g_rtrace[j].pc);
+                fprintf(stderr,"\n[diff]   interp same-index+after:");
+                { int base=(g_rtrace_n>8?g_rtrace_n-8:0); for(int j=base;j<g_strace_n && j<base+18;j++) fprintf(stderr," %04X",g_strace[j].pc); }
+                fprintf(stderr,"\n");
+            }
             g_diff_max=0;                  /* one shot */
         }
         g_diff_trace=0;
@@ -1127,8 +1264,8 @@ void sms_dispatch_miss(uint16_t addr){
     if (!g_miss_seen || !g_miss_seen[addr]){
         if (g_miss_seen) g_miss_seen[addr] = 1;
         g_miss_count++;
-        fprintf(stderr, "[dispatch] miss 0x%04X (frame %llu) -> hybrid\n",
-                addr, (unsigned long long)g_frame);
+        fprintf(stderr, "[dispatch] miss 0x%04X (frame %llu, slot banks %d/%d/%d) -> hybrid\n",
+                addr, (unsigned long long)g_frame, g_bank[0], g_bank[1], g_bank[2]);
 
         /* Query the always-on entry ring backward for the call chain. The last
          * entry is the function that jumped/called to the bad target. */
@@ -1157,7 +1294,28 @@ void sms_dispatch_miss(uint16_t addr){
     hybrid_interpret(addr);
 }
 
+/* ====================== unbalanced call (diagnostic) ======================
+ * Generated code calls this when a CALL returns with SP LOWER than before the call: the callee
+ * (or something it propagated through) left a word on the stack, i.e. the C call structure no
+ * longer matches the Z80 stack. Typical cause: a callee that discards its own return address and
+ * RETs into a value the caller pushed, in a form the recompiler does not model yet. Logged once
+ * per call site; execution continues unchanged. */
+void sms_call_unbalanced(uint16_t at){
+    static uint8_t seen[65536 / 8];
+    if (seen[at >> 3] & (1u << (at & 7))) return;
+    seen[at >> 3] |= (uint8_t)(1u << (at & 7));
+    fprintf(stderr, "[stack] call at 0x%04X returned with SP below its pre-call value (frame %llu, sp %04X, slot banks %d/%d/%d); trail:",
+            at, (unsigned long long)g_frame, g_z80.sp, g_bank[0], g_bank[1], g_bank[2]);
+    for (int i = 1; i <= 8; i++){
+        if (g_enter_pos < (uint32_t)i) break;
+        fprintf(stderr, " %04X", g_enter_ring[(g_enter_pos - (uint32_t)i) & (SMS_ENTER_RING_SIZE - 1)]);
+    }
+    fprintf(stderr, "\n");
+}
+
 /* ====================== lifecycle ====================== */
+uint8_t *glue_rom_image(size_t *size){ if (size) *size = g_rom_size; return g_rom; }
+
 bool glue_load_rom(const char *path){
     FILE *f = fopen(path, "rb");
     if (!f){ fprintf(stderr, "[runner] cannot open ROM %s\n", path); return false; }
@@ -1186,6 +1344,17 @@ bool glue_load_rom(const char *path){
     }
 #endif
     free(g_rom);g_rom=loaded;g_rom_size=got;g_rom_crc=crc;
+    {   /* save file: <rom>.sav next to the ROM, or <SMS_SAVE_DIR>/<rom name>.sav when that is set */
+        const char *sd=getenv("SMS_SAVE_DIR");
+        if (sd && sd[0]){
+            const char *base=path,*p;
+            for (p=path;*p;p++) if (*p=='/'||*p=='\\') base=p+1;
+            snprintf(g_sav_path,sizeof g_sav_path,"%s/%s.sav",sd,base);
+        } else snprintf(g_sav_path,sizeof g_sav_path,"%s.sav",path);
+    }
+    memset(g_sram,0,sizeof g_sram);
+    if (getenv("SMS_NO_SAVE")) g_sav_path[0]=0;      /* test runs: neither load nor write the .sav */
+    if (g_sav_path[0]){ FILE *sf=fopen(g_sav_path,"rb"); if (sf){ size_t n=fread(g_sram,1,sizeof g_sram,sf); (void)n; fclose(sf); } }
     for(int i=0;i<3;i++)set_bank(i,g_bank[i]);
     return true;
 }
@@ -1193,6 +1362,7 @@ bool glue_load_rom(const char *path){
 void glue_init(bool is_gg, uint64_t frame_limit){
     memset(&g_z80, 0, sizeof(g_z80));
     memset(g_ram, 0, sizeof(g_ram));
+    g_cartctl=0; g_sram_dirty=false;
     set_bank(0,0);set_bank(1,1);set_bank(2,2);
     g_z80.sp = 0xDFF0;
     g_z80.cyc = 0;
@@ -1212,10 +1382,12 @@ void glue_init(bool is_gg, uint64_t frame_limit){
     g_vdpw_pos = 0;
     vdp_set_write_observer(vdp_write_obs);   /* always-on raster probe */
     psg_init();                          /* fresh PSG state */
+    fm_reset();                          /* YM2413 (only audible if the game enables it via $F2) */
     g_psg_cyc = 0;
     g_pad1 = g_pad2 = 0;                  /* controllers idle */
     g_hybrid_cyc = g_hybrid_calls = 0;
     glue_diff_init();                    /* differential harness (env-gated, no-op unless SMS_DIFF_ADDR) */
+    if (!g_cov_bits) cov_init();         /* function coverage (env-gated, SMS_COVERAGE) */
     vdp_enable_raster(g_frame_cb || g_dump_path);
 }
 
@@ -1233,7 +1405,7 @@ void glue_run_interp(void){
         for (;;){
             if (vdp_irq_asserted() && g_hz.iff1 && !g_hz.int_pending)
                 z80_gen_int(&g_hz, 0xFF);          /* IM1 vector 0x0038 */
-            z80_step(&g_hz); g_frame_ic++;
+            g_dbg_pc = g_hz.pc; z80_step(&g_hz); g_frame_ic++;
             advance_vdp(g_hz.cyc);                  /* frame dump/limit/cb here */
             g_sync_deadline = g_next_line_cyc;
         }
@@ -1248,6 +1420,15 @@ void glue_run(void){
     if (setjmp(g_quit_env) == 0){
         call_by_address(0x0000);         /* reset entry; runs the game */
         /* If we get here the reset routine RETurned (unusual) - just stop. */
+        fprintf(stderr, "[runner] WARNING: the reset routine returned (pc=%04X sp=%04X frame %llu): a RET unwound past the top "
+                        "of the recompiled call stack (stack-imbalance / unhandled push-ret idiom)\n",
+                g_z80.pc, g_z80.sp, (unsigned long long)g_frame);
+        fprintf(stderr, "[runner] last function entries (oldest first):");
+        for (int k = 47; k >= 0; k--) fprintf(stderr, " %04X", g_enter_ring[(g_enter_pos - 1u - (uint32_t)k) & (SMS_ENTER_RING_SIZE - 1)]);
+        fprintf(stderr, "\n[runner] stack memory below sp (pending return addresses, nearest first):");
+        for (uint16_t a = (uint16_t)(g_z80.sp - 2), n = 0; n < 20; a = (uint16_t)(a - 2), n++)
+            fprintf(stderr, " %04X", sms_read16(a));
+        fprintf(stderr, "\n");
     }
     mb_dump();                           /* bank-alias probe summary (env-gated) */
     g_running = false;

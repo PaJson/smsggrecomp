@@ -146,6 +146,8 @@ int main(int argc, char **argv){
     ff_seed_vectors(&fl);
     for (int i=0;i<cfg.extra_count;i++)
         funclist_add(&fl, cfg.extra[i], -1, NULL, FUNC_SRC_CONFIG, true);
+    for (int i=0;i+1<cfg.banked_count;i+=2)       /* (addr,bank) pairs */
+        funclist_add(&fl, cfg.banked[i], (int)cfg.banked[i+1], NULL, FUNC_SRC_CONFIG, true);
 
     /* Resolve [jump_tables]: read each 16-bit LE pointer table from ROM and
      * seed its targets as banked entries (ground truth; PRINCIPLES #16). */
@@ -154,6 +156,16 @@ int main(int argc, char **argv){
         uint16_t taddr = cfg.jt_addr[t];
         int bank = cfg.jt_bank[t];
         int slot_bank = (bank >= 0) ? bank : (taddr >> 14);
+        if (cfg.jt_page[t] >= 0){      /* byte table: entry = low byte of a target in page `page` */
+            for (int e=0;e<cfg.jt_count[t];e++){
+                size_t off = rom_z80_to_offset(&rom, (uint16_t)(taddr + e), slot_bank);
+                if (off==SIZE_MAX || off >= rom.size) continue;
+                uint16_t target = (uint16_t)((cfg.jt_page[t] << 8) | rom_read_offset(&rom, off));
+                funclist_add(&fl, target, bank, NULL, FUNC_SRC_TABLE, true);
+                jt_added++;
+            }
+            continue;
+        }
         for (int e=0;e<cfg.jt_count[t];e++){
             size_t off = rom_z80_to_offset(&rom, (uint16_t)(taddr + e*2), slot_bank);
             if (off==SIZE_MAX || off+1 >= rom.size) continue;

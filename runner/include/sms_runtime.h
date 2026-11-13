@@ -33,8 +33,13 @@ static inline void sms_tick_post(uint8_t n){
     if(g_z80.cyc>=g_sync_deadline)sms_sync();
     g_z80.ei_block=0;
 }
+/* Function coverage (diagnostic): env SMS_COVERAGE=<file> -> at exit, the runner writes every
+ * executed function entry as "bank addr" (runner/glue.c). Off = one predictable branch. */
+extern int g_cov_on;
+void sms_cov_hit(uint16_t addr);
 static inline void sms_enter(uint16_t addr){
     g_enter_ring[g_enter_pos & (SMS_ENTER_RING_SIZE-1)]=addr;g_enter_pos++;
+    if(g_cov_on)sms_cov_hit(addr);
 }
 /* Publish the real interrupted PC before every possible sync. Calls, I/O,
  * block operations and other externally observable instructions publish

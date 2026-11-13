@@ -100,6 +100,7 @@ void bankstate_init(BankState *bs, uint16_t entry, int entry_bank){
     bs->slot[0]=0;     bs->slot[1]=1;     bs->slot[2]=2;
     bs->known[0]=true; bs->known[1]=true; bs->known[2]=false;
     bs->a_known = -1;
+    bs->hl_known = -1;
     int es = entry >> 14;            /* entry's slot (0/1/2) */
     if (entry_bank >= 0 && es < 3){
         bs->slot[es]  = entry_bank;
@@ -153,6 +154,13 @@ static bool insn_clobbers_a(const Z80Insn *in){
         return false;
     }
 }
+/* Mapper write of a known value `v` to frame register `reg` ($FFFD/E/F). */
+static void bank_write_reg(BankState *bs, uint16_t reg, int v){
+    int slot = reg==0xFFFD?0 : reg==0xFFFE?1 : reg==0xFFFF?2 : -1;
+    if (slot < 0) return;
+    if (v >= 0){ bs->slot[slot] = v & 0xFF; bs->known[slot] = true; }
+    else         bs->known[slot] = false;                /* runtime-determined: defer */
+}
 static void bank_set(BankState *bs, int slot){
     if (bs->a_known >= 0){ bs->slot[slot] = bs->a_known; bs->known[slot] = true; }
     else                   bs->known[slot] = false;       /* runtime-determined: defer */
@@ -181,6 +189,20 @@ static int pager_index(uint16_t addr){
 void bankstate_step(BankState *bs, const TracedInsn *cur, const TracedInsn *prev){
     (void)prev;
     const Z80Insn *in = &cur->insn;
+    /* HL-addressed mapper writes: `ld hl,$FFFx ; ld (hl),n` (or `ld (hl),a`), as in
+     * Phantasy Star's CallSndUpdate (`ld hl,$FFFF ; ld (hl),:Bank12 ; jp $8043`).
+     * HL is only trusted for the single next instruction (conservative). */
+    {
+        int hl_prev = bs->hl_known;
+        bs->hl_known = -1;
+        if (in->prefix == Z80_PFX_NONE){
+            if (in->opcode == 0x21) bs->hl_known = in->imm;                               /* ld hl,nn */
+            else if (hl_prev >= 0xFFFC && hl_prev <= 0xFFFF){
+                if (in->opcode == 0x36) bank_write_reg(bs, (uint16_t)hl_prev, in->imm & 0xFF); /* ld (hl),n */
+                else if (in->opcode == 0x77) bank_write_reg(bs, (uint16_t)hl_prev, bs->a_known); /* ld (hl),a */
+            }
+        }
+    }
     if (in->prefix == Z80_PFX_NONE){
         switch (in->opcode){
         case 0x3E: bs->a_known = (uint8_t)in->imm; break;                         /* ld a,n */
@@ -248,13 +270,15 @@ static void detect_pager(const TraceResult *tr, uint16_t start){
     uint16_t a = start;
     bool is_const=false; int cval=0, delta=0;        /* A = is_const? cval : (incoming+delta) */
     struct { int slot; PagerMode mode; int val; } eff[3]; int neff=0;
-    for (int guard=0; guard<32 && neff<3; guard++){
+    bool reached_ret = false;     /* a pager's writes are only its effect if it then simply returns */
+    for (int guard=0; guard<32; guard++){
         const Z80Insn *in = tr_insn_at(tr, a);
         if (!in || in->prefix!=Z80_PFX_NONE) break;
         uint8_t op=in->opcode;
+        if (in->cf == Z80_CF_RET){ reached_ret = true; break; }
         if (op==0x32){                                       /* ld (nn),a (A preserved) */
             int slot = in->imm==0xFFFD?0 : in->imm==0xFFFE?1 : in->imm==0xFFFF?2 : -1;
-            if (slot>=0){
+            if (slot>=0 && neff<3){
                 eff[neff].slot=slot;
                 eff[neff].mode=is_const?PG_CONST:PG_AFFINE;
                 eff[neff].val =is_const?(cval&0xFF):(delta&0xFF);
@@ -272,7 +296,10 @@ static void detect_pager(const TraceResult *tr, uint16_t start){
         }
         a = (uint16_t)(a + in->length);
     }
-    if (neff>0 && pager_index(start)<0 && g_pager_n < (int)(sizeof g_pager/sizeof g_pager[0])){
+    /* Phantasy Star Retranslation: `$0486 ld a,29 ; ld ($FFFE),a ; push ix ; call ... ; ld a,1 ; ld ($FFFE),a ; ret`
+     * pages a bank in and RESTORES it. Walking only the first instructions (stopped by the DD-prefixed push)
+     * made that look like a permanent slot-1 switch and the tracer then decoded bank 29 as code. */
+    if (neff>0 && reached_ret && pager_index(start)<0 && g_pager_n < (int)(sizeof g_pager/sizeof g_pager[0])){
         g_pager[g_pager_n].addr=start; g_pager[g_pager_n].n=neff;
         for (int e=0;e<neff;e++){
             g_pager[g_pager_n].eff[e].slot=eff[e].slot;
@@ -331,6 +358,7 @@ static bool insn_writes_rp(const Z80Insn *in, int preg){
     default: return true;                                      /* DDCB/FDCB etc.: conservative */
     }
 }
+static bool push_feeds_call(const TraceResult *t, int i);
 bool trace_computed_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr){
     /* The Z80 synthesises `call (hl)` as `ld rr,ret ; push rr ; ... ; jp (hl)`.
      * The push is often immediately before the jp, but it can be SEPARATED from
@@ -346,7 +374,7 @@ bool trace_computed_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_
         const TracedInsn *cur=&t->insns[i], *nxt=&t->insns[i+1];
         if ((uint16_t)(cur->addr + cur->insn.length) != nxt->addr) break;  /* left the block */
         const Z80Insn *in=&cur->insn;
-        if (in->cf==Z80_CF_RET) break;          /* a prior block's terminator */
+        if (in->cf==Z80_CF_RET || in->cf==Z80_CF_JUMP) break;  /* a prior block's terminator (incl. unconditional jp/jr/jp (hl)) */
         int preg=-1, ispop=0;
         if (in->prefix==Z80_PFX_NONE){
             switch (in->opcode){
@@ -361,6 +389,7 @@ bool trace_computed_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_
         if (ispop){ pend++; continue; }
         if (preg>=0){
             if (pend>0){ pend--; continue; }    /* this push is popped before the jp */
+            if (push_feeds_call(t, i)) continue;    /* consumed by a `push cont ; call F` */
             /* Top-of-stack push of `preg`: trace it back to the `ld preg,nn16`
              * that produced the value, skipping instructions that don't write
              * preg (e.g. the `jp` between `ld hl,ret` and `push hl` in a
@@ -376,6 +405,136 @@ bool trace_computed_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_
             }
             return false;                       /* couldn't resolve to an immediate */
         }
+    }
+    return false;
+}
+/* push register index of a `push rr` (0=bc 1=de 2=hl 3=af 4=ix 5=iy), or -1 */
+static int push_reg(const Z80Insn *in){
+    if (in->prefix==Z80_PFX_NONE){
+        switch (in->opcode){ case 0xC5: return 0; case 0xD5: return 1; case 0xE5: return 2; case 0xF5: return 3; }
+    } else if ((in->prefix==Z80_PFX_DD || in->prefix==Z80_PFX_FD) && in->opcode==0xE5)
+        return (in->prefix==Z80_PFX_DD)?4:5;
+    return -1;
+}
+/* `ld rr,cont ; push rr ; call F` where F discards its own return address (`pop hl ; ret`,
+ * Phantasy Star LABEL_787B) so its RET resumes at `cont`. Returns true and sets *cont_addr
+ * when the instruction right before the call is a push of an immediately-loaded register. */
+bool trace_push_call(const TraceResult *t, uint16_t call_addr, uint16_t *cont_addr){
+    int ci=-1; for (int i=0;i<t->insn_count;i++) if (t->insns[i].addr==call_addr){ ci=i; break; }
+    if (ci<1) return false;
+    const Z80Insn *c=&t->insns[ci].insn;
+    if (!((c->cf==Z80_CF_CALL || c->cf==Z80_CF_CALL_COND) && c->has_target)) return false;
+    const TracedInsn *p=&t->insns[ci-1];
+    if ((uint16_t)(p->addr + p->insn.length) != call_addr) return false;
+    int preg=push_reg(&p->insn);
+    if (preg<0 || preg==3) return false;
+    for (int j=ci-2; j>=0; j--){
+        const TracedInsn *cur=&t->insns[j], *nxt=&t->insns[j+1];
+        if ((uint16_t)(cur->addr + cur->insn.length) != nxt->addr) return false;
+        const Z80Insn *ld=&cur->insn;
+        if (ld->cf!=Z80_CF_NONE) return false;
+        int lr = (ld->prefix==Z80_PFX_NONE)
+               ? (ld->opcode==0x01?0:ld->opcode==0x11?1:ld->opcode==0x21?2:-1)
+               : (((ld->prefix==Z80_PFX_DD||ld->prefix==Z80_PFX_FD)&&ld->opcode==0x21)
+                   ?(ld->prefix==Z80_PFX_DD?4:5):-1);
+        if (lr==preg && ld->imm_bits==16){ *cont_addr=ld->imm; return true; }
+        if (insn_writes_rp(ld, preg)) return false;
+    }
+    return false;
+}
+/* A `push rr` immediately followed by a CALL whose callee consumes it (trace_push_call) is
+ * not an unmatched push for the computed-jump scans below. */
+static bool push_feeds_call(const TraceResult *t, int i){
+    if (i+1 >= t->insn_count) return false;
+    const TracedInsn *nx=&t->insns[i+1];
+    if (nx->addr != (uint16_t)(t->insns[i].addr + t->insns[i].insn.length)) return false;
+    uint16_t c; return trace_push_call(t, nx->addr, &c);
+}
+/* `push rr ; ... ; ret` = computed jump to the pushed address (Golvellius: `push hl ; ld l,a ; ... ; ret`).
+ * An unconditional RET whose straight-line block ends with an UNMATCHED push is not a return.
+ * A second unmatched push below it, fed by `ld rr,nn16`, is the continuation the target's own
+ * `ret` resumes at (same contract as a computed call). */
+bool trace_ret_jump(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont){
+    int ri=-1; for (int i=0;i<t->insn_count;i++) if (t->insns[i].addr==ret_addr){ ri=i; break; }
+    if (ri<0) return false;
+    const Z80Insn *r=&t->insns[ri].insn;
+    if (r->prefix!=Z80_PFX_NONE) return false;
+    if (!((r->cf==Z80_CF_RET && r->opcode==0xC9) || (r->cf==Z80_CF_RET_COND && (r->opcode&0xC7)==0xC0))) return false;
+    *has_cont=false;
+    int pend=0, found=0, fidx[2]={-1,-1}, fpreg[2]={-1,-1};
+    for (int i=ri-1; i>=0 && found<2; i--){
+        const TracedInsn *cur=&t->insns[i], *nxt=&t->insns[i+1];
+        if ((uint16_t)(cur->addr + cur->insn.length) != nxt->addr) break;
+        const Z80Insn *in=&cur->insn;
+        if (in->cf==Z80_CF_RET || in->cf==Z80_CF_JUMP) break;
+        int preg=-1, ispop=0;
+        if (in->prefix==Z80_PFX_NONE){
+            switch (in->opcode){
+                case 0xC5: preg=0; break; case 0xD5: preg=1; break;
+                case 0xE5: preg=2; break; case 0xF5: preg=3; break;
+                case 0xC1: case 0xD1: case 0xE1: case 0xF1: ispop=1; break;
+            }
+        } else if (in->prefix==Z80_PFX_DD || in->prefix==Z80_PFX_FD){
+            if      (in->opcode==0xE5) preg=(in->prefix==Z80_PFX_DD)?4:5;
+            else if (in->opcode==0xE1) ispop=1;
+        }
+        if (ispop){ pend++; continue; }
+        if (preg>=0){
+            if (pend>0){ pend--; continue; }
+            if (push_feeds_call(t, i)) continue;    /* consumed by a `push cont ; call F` */
+            fidx[found]=i; fpreg[found]=preg; found++;
+        }
+    }
+    if (found==0) return false;
+    if (found==2){
+        for (int j=fidx[1]-1; j>=0; j--){
+            const Z80Insn *ld=&t->insns[j].insn;
+            int lr = (ld->prefix==Z80_PFX_NONE)
+                   ? (ld->opcode==0x01?0:ld->opcode==0x11?1:ld->opcode==0x21?2:-1)
+                   : (((ld->prefix==Z80_PFX_DD||ld->prefix==Z80_PFX_FD)&&ld->opcode==0x21)
+                       ?(ld->prefix==Z80_PFX_DD?4:5):-1);
+            if (lr==fpreg[1] && ld->imm_bits==16){ *cont_addr=ld->imm; *has_cont=true; break; }
+            if (insn_writes_rp(ld, fpreg[1])) break;
+        }
+    }
+    return true;
+}
+bool trace_trampoline_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr){
+    if (!t->rom) return false;
+    int ji=-1; for (int i=0;i<t->insn_count;i++) if (t->insns[i].addr==jp_addr){ ji=i; break; }
+    if (ji<0) return false;
+    const Z80Insn *jp=&t->insns[ji].insn;
+    if (jp->cf!=Z80_CF_JUMP || !jp->has_target) return false;
+    /* first instruction at the jump target must be `push rr` */
+    uint16_t T=jp->target;
+    int start_slot = t->start >> 14, slot = T >> 14;
+    int sb = (slot==start_slot && t->bank>=0) ? t->bank : slot;
+    size_t off = rom_z80_to_offset(t->rom, T, sb);
+    if (off==SIZE_MAX || off>=t->rom->size) return false;
+    uint8_t buf[4]; for (int k=0;k<4;k++) buf[k]=rom_read_offset(t->rom, off+(size_t)k);
+    Z80Insn ti; z80_decode(buf,4,T,&ti);
+    int preg=-1;
+    if (!ti.illegal){
+        if (ti.prefix==Z80_PFX_NONE){
+            if      (ti.opcode==0xC5) preg=0;
+            else if (ti.opcode==0xD5) preg=1;
+            else if (ti.opcode==0xE5) preg=2;
+        } else if ((ti.prefix==Z80_PFX_DD || ti.prefix==Z80_PFX_FD) && ti.opcode==0xE5)
+            preg=(ti.prefix==Z80_PFX_DD)?4:5;
+    }
+    if (preg<0) return false;
+    /* walk back through the contiguous block to the `ld preg,nn16` that fed it */
+    for (int i=ji-1; i>=0; i--){
+        const TracedInsn *cur=&t->insns[i], *nxt=&t->insns[i+1];
+        if ((uint16_t)(cur->addr + cur->insn.length) != nxt->addr) return false;  /* left the block */
+        const Z80Insn *in=&cur->insn;
+        if (in->cf!=Z80_CF_NONE) return false;
+        int lr = (in->prefix==Z80_PFX_NONE)
+               ? (in->opcode==0x01?0:in->opcode==0x11?1:in->opcode==0x21?2:-1)
+               : (((in->prefix==Z80_PFX_DD||in->prefix==Z80_PFX_FD)&&in->opcode==0x21)
+                   ?(in->prefix==Z80_PFX_DD?4:5):-1);
+        if (lr==preg && in->imm_bits==16){ *cont_addr=in->imm; return true; }
+        if (insn_writes_rp(in, preg)) return false;
     }
     return false;
 }
@@ -405,10 +564,17 @@ static bool in_data_iv(uint16_t a, int bank){
     return false;
 }
 
+/* Diagnostic: env SMSREC_TRUNC_LOG=1 prints every point where a trace stops on data/illegal bytes
+ * (usually a call to a routine that never returns, or an untracked computed flow). */
+static void trunc_log(uint16_t start, int bank, uint16_t pc, const char *why){
+    static int on = -1; if (on < 0){ const char *e = getenv("SMSREC_TRUNC_LOG"); on = (e && *e && *e != '0'); }
+    if (on) fprintf(stderr, "[trunc] func %04X bank %d stops at %04X (%s)\n", start, bank, pc, why);
+}
 void trace_function(const SmsRom *rom, uint16_t start, int bank,
                     const uint16_t *entries, int entry_count, TraceResult *out){
     memset(out,0,sizeof(*out));
     out->start=start;
+    out->rom=rom; out->bank=bank;
     int start_slot = start >> 14;
     /* simple worklist of pending addresses within this function */
     uint16_t stack[4096]; int sp=0;
@@ -421,28 +587,69 @@ void trace_function(const SmsRom *rom, uint16_t start, int bank,
          * $C006); other slots use the default reset mapping (slot i = bank i). */
         int slot = pc >> 14;
         int slot_bank = (slot == start_slot && bank >= 0) ? bank : slot;
-        if (in_data_iv(pc, slot_bank)){ out->truncated=true; continue; }  /* jump-table data, not code */
+        if (in_data_iv(pc, slot_bank)){ out->truncated=true; trunc_log(start,bank,pc,"jump-table data"); continue; }  /* jump-table data, not code */
         size_t off = rom_z80_to_offset(rom, pc, slot_bank);
-        if (off==SIZE_MAX || off>=rom->size){ out->truncated=true; continue; }
+        if (off==SIZE_MAX || off>=rom->size){ out->truncated=true; trunc_log(start,bank,pc,"unmapped"); continue; }
         uint8_t buf[4];
         for (int k=0;k<4;k++) buf[k]=rom_read_offset(rom,off+(size_t)k);
         Z80Insn in;
         z80_decode(buf,4,pc,&in);
-        if (in.illegal){ out->truncated=true; continue; }
+        if (in.illegal){ out->truncated=true; trunc_log(start,bank,pc,"illegal opcode"); continue; }
         insns_add(out,pc,&in);
 
         /* intra-function jumps -> labels + follow; external targets ignored */
         if ((in.cf==Z80_CF_JUMP || in.cf==Z80_CF_JUMP_COND) && in.has_target){
-            if (!is_entry_addr(entries,entry_count,in.target)){
+            /* A jump across a 16 KB mapper slot is never intra-function: the target's
+             * bank is decided by mapper writes the tracer doesn't model here (e.g.
+             * Phantasy Star `ld hl,$FFFF ; ld (hl),12 ; jp $8043`). Decoding it under
+             * the default slot bank inlines the wrong bank's bytes. Leave it external
+             * so discovery registers the right (bank,addr) entry and codegen emits a
+             * bank-resolved tail call. */
+            bool cross_slot = (in.target >> 14) != (pc >> 14);
+            /* `ld rr,cont ; push rr ; jp T` is a call to T with an explicit return
+             * address (Phantasy Star's sound driver: `ld bc,+ ; push bc ; jp $8867`).
+             * T is external and its `ret` resumes at `cont`; follow `cont`, not T. */
+            uint16_t jcont;
+            bool ext_cond = in.cf==Z80_CF_JUMP_COND && (cross_slot || is_entry_addr(entries,entry_count,in.target));
+            if (ext_cond && trace_computed_call(out, pc, &jcont)){
+                /* `ld rr,cont ; push rr ; ... ; jp cc,T` with T external: also follow cont */
+                if (jcont < 0xC000 && !is_entry_addr(entries,entry_count,jcont)){
+                    labels_add(out,jcont);
+                    if (sp<(int)(sizeof(stack)/sizeof(stack[0]))) stack[sp++]=jcont;
+                }
+            } else
+            if (in.cf==Z80_CF_JUMP && (trace_computed_call(out, pc, &jcont) || trace_trampoline_call(out, pc, &jcont))){
+                if (jcont < 0xC000 && !is_entry_addr(entries,entry_count,jcont)){
+                    labels_add(out,jcont);
+                    if (sp<(int)(sizeof(stack)/sizeof(stack[0]))) stack[sp++]=jcont;
+                }
+            } else
+            if (!cross_slot && !is_entry_addr(entries,entry_count,in.target)){
                 labels_add(out,in.target);
                 if (sp<(int)(sizeof(stack)/sizeof(stack[0]))) stack[sp++]=in.target;
+            }
+        }
+        /* `ld rr,cont ; push rr ; call F` (F drops its return address): follow cont */
+        if ((in.cf==Z80_CF_CALL || in.cf==Z80_CF_CALL_COND) && in.has_target){
+            uint16_t pc2;
+            if (trace_push_call(out, pc, &pc2) && pc2 < 0xC000 && !is_entry_addr(entries,entry_count,pc2)){
+                labels_add(out,pc2);
+                if (sp<(int)(sizeof(stack)/sizeof(stack[0]))) stack[sp++]=pc2;
+            }
+        }
+        /* `push target [; push cont-below] ; ret` = computed jump/call: follow cont */
+        if (in.cf==Z80_CF_RET || in.cf==Z80_CF_RET_COND){
+            uint16_t rc; bool hc=false;
+            if (trace_ret_jump(out, pc, &rc, &hc) && hc && rc < 0xC000 && !is_entry_addr(entries,entry_count,rc)){
+                labels_add(out,rc);
+                if (sp<(int)(sizeof(stack)/sizeof(stack[0]))) stack[sp++]=rc;
             }
         }
         /* computed CALL (push ret; jp (hl)) -> follow the continuation */
         if (is_computed_jp(&in)){
             uint16_t cont;
             if (trace_computed_call(out, pc, &cont) &&
-                !is_entry_addr(entries,entry_count,cont)){
+                cont < 0xC000 && !is_entry_addr(entries,entry_count,cont)){
                 labels_add(out,cont);
                 if (sp<(int)(sizeof(stack)/sizeof(stack[0]))) stack[sp++]=cont;
             }
@@ -450,6 +657,10 @@ void trace_function(const SmsRom *rom, uint16_t start, int bank,
         /* fall-through */
         if (z80_cf_falls_through(in.cf) && !in.is_halt){
             uint16_t next=(uint16_t)(pc+in.length);
+            /* Unrolled block-I/O runs (outi x128, entered at computed offsets) have every
+             * instruction registered as an entry: stop at the next entry (codegen emits a tail
+             * call) instead of inlining the whole remaining run into every entry (O(n^2) code). */
+            if (z80_is_blockio_single(&in) && is_entry_addr(entries,entry_count,next)) continue;
             if (sp<(int)(sizeof(stack)/sizeof(stack[0]))) stack[sp++]=next;
         } else if (in.is_halt){
             uint16_t next=(uint16_t)(pc+in.length);
@@ -905,6 +1116,11 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
                 bool is_tailjump = (in->cf==Z80_CF_JUMP && in->has_target &&
                                     !trace_is_label(&tr,in->target) &&
                                     !is_entry_addr(entries,n,in->target));
+                /* `jp cc,T` across a 16 KB mapper slot is emitted as an external call_by_address
+                 * (trace_function never treats it as intra-function), so T must become a function. */
+                bool is_condtail = (in->cf==Z80_CF_JUMP_COND && in->has_target &&
+                                    ((in->target>>14) != (tr.insns[k].addr>>14)));
+                if (is_condtail) is_tailjump = true;
                 if (!(is_call || is_tailjump) || !in->has_target) continue;
                 uint16_t T=in->target;
                 if (in_blacklist(blacklist,blacklist_count,T)) continue;

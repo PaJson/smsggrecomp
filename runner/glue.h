@@ -11,6 +11,12 @@
 /* Load a .sms/.gg image into the runner's ROM space. Returns false on error. */
 bool     glue_load_rom(const char *path);
 
+/* Writable view of the loaded ROM image (for per-game data patches applied in on_post_reset). */
+uint8_t *glue_rom_image(size_t *size);
+
+/* Write cartridge (battery) RAM to <rom>.sav if it changed. */
+void     glue_sram_flush(void);
+
 /* Initialise bus/VDP/CPU for a fresh run. frame_limit==0 means run forever. */
 void     glue_init(bool is_gg, uint64_t frame_limit);
 

@@ -11,6 +11,7 @@
  */
 #include "glue.h"
 #include "coverage_route.h"
+extern void sms_write8(uint16_t addr, uint8_t val);
 #ifdef SMSGG_HAVE_GAME_LAYOUT
 #include "game_spec.h"
 #endif
@@ -28,6 +29,7 @@ static bool g_automated_input;
 
 static bool g_benchmark;
 static int g_press_n;
+static double g_speed_opt = 1.0;   /* --speed N (window mode) */
 static uint64_t g_audio_frames;
 static uint64_t g_benchmark_start;
 static double g_route_cpu=-1;
@@ -49,12 +51,24 @@ static int benchmark_frame(const uint32_t *fb, int w, int h){
 
 #ifdef SMS_HAVE_SDL
 #include "host_sdl.h"
+#include "hud.h"
 #include "video/sms_vdp.h"
 /* Bridge the runner's per-frame callback to the SDL host. Returns nonzero to
  * request shutdown (glue.c then unwinds the run loop). */
 static int sdl_frame_cb(const uint32_t *fb, int w, int h){
     if(g_benchmark)benchmark_frame(fb,w,h);
     bool keep = host_present(fb, w, h);
+    /* Settings HUD (hud.c, F1 / pad Back): the emulation pauses here; the last frame is shown
+     * with the overlay until the HUD is closed. Audio just runs dry (silence) meanwhile. */
+    if (keep && fb && hud_is_open()){
+        static uint32_t over[256 * 240];
+        while (keep && hud_is_open() && w * h <= (int)(sizeof over / sizeof over[0])){
+            memcpy(over, fb, (size_t)w * (size_t)h * sizeof(uint32_t));
+            hud_draw(over, w, h);
+            keep = host_present(over, w, h);
+        }
+        if (keep) keep = host_present(fb, w, h);
+    }
     if (!g_automated_input) glue_set_pad1(host_get_pad1());
     return keep ? 0 : 1;
 }
@@ -114,7 +128,9 @@ static void audio_sink(const int16_t *frames, size_t n){
  * KEYS letters: U D L R (d-pad), A=button1, B=button2, S=start; empty = release.
  * Each directive sets player 1's held buttons from its frame until a later one.
  * Deterministic input for automated tests — no window needed. */
-static struct { uint64_t frame; uint8_t mask; } g_press[32];
+/* Growable; sorted by frame (stable) on first use, then consumed with a cursor (O(1)/frame). */
+typedef struct { uint64_t frame; uint8_t mask; uint32_t seq; } PressEv;
+static PressEv *g_press; static int g_press_cap;
 
 static uint8_t press_keys_to_mask(const char *s){
     uint8_t m = 0;
@@ -133,18 +149,56 @@ static uint8_t press_keys_to_mask(const char *s){
     return m;
 }
 static void press_add(const char *tok){
-    if (g_press_n >= (int)(sizeof g_press / sizeof g_press[0])) return;
+    if (g_press_n >= g_press_cap){
+        int nc = g_press_cap ? g_press_cap * 2 : 1024;
+        PressEv *n = (PressEv *)realloc(g_press, (size_t)nc * sizeof *n); if (!n) return;
+        g_press = n; g_press_cap = nc;
+    }
     const char *colon = strchr(tok, ':');
     g_press[g_press_n].frame = strtoull(tok, NULL, 0);
     g_press[g_press_n].mask  = press_keys_to_mask(colon ? colon+1 : "");
+    g_press[g_press_n].seq   = (uint32_t)g_press_n;
     g_press_n++;
 }
+/* --poke FRAME:ADDR=VAL (repeatable; hex ADDR/VAL) / --poke-file (one per line): write a RAM byte
+ * at a frame boundary (debug/testing). */
+typedef struct { uint64_t frame; uint16_t addr; uint8_t val; uint32_t seq; } PokeEv;
+static PokeEv *g_poke; static int g_poke_cap;
+static int g_poke_n;
+static void poke_add(const char *tok){
+    char *c = NULL; uint64_t f = strtoull(tok, &c, 0);
+    if (!c || *c != ':') return;
+    unsigned a = 0, v = 0; if (sscanf(c+1, "%x=%x", &a, &v) != 2) return;
+    if (g_poke_n >= g_poke_cap){
+        int nc = g_poke_cap ? g_poke_cap * 2 : 256;
+        PokeEv *n = (PokeEv *)realloc(g_poke, (size_t)nc * sizeof *n); if (!n) return;
+        g_poke = n; g_poke_cap = nc;
+    }
+    g_poke[g_poke_n].frame=f; g_poke[g_poke_n].addr=(uint16_t)a; g_poke[g_poke_n].val=(uint8_t)v;
+    g_poke[g_poke_n].seq=(uint32_t)g_poke_n; g_poke_n++;
+}
+static int press_cmp(const void *x, const void *y){
+    const PressEv *a = x, *b = y;
+    if (a->frame != b->frame) return a->frame < b->frame ? -1 : 1;
+    return a->seq < b->seq ? -1 : (a->seq > b->seq);
+}
+static int poke_cmp(const void *x, const void *y){
+    const PokeEv *a = x, *b = y;
+    if (a->frame != b->frame) return a->frame < b->frame ? -1 : 1;
+    return a->seq < b->seq ? -1 : (a->seq > b->seq);
+}
 static uint8_t press_provider(uint64_t frame){
-    uint8_t m = 0; uint64_t best = 0; int found = 0;
-    for (int i = 0; i < g_press_n; i++)
-        if (g_press[i].frame <= frame && (!found || g_press[i].frame >= best)){
-            best = g_press[i].frame; m = g_press[i].mask; found = 1;
-        }
+    static int sorted, pi, ki; static uint8_t m; static uint64_t last; static int started;
+    if (!sorted){
+        if (g_press_n) qsort(g_press, (size_t)g_press_n, sizeof *g_press, press_cmp);
+        if (g_poke_n)  qsort(g_poke,  (size_t)g_poke_n,  sizeof *g_poke,  poke_cmp);
+        sorted = 1;
+    }
+    if (started && frame < last){ pi = ki = 0; m = 0; }    /* rewound (reset): start over */
+    started = 1; last = frame;
+    while (ki < g_poke_n && g_poke[ki].frame < frame) ki++;  /* missed frames are skipped, as before */
+    while (ki < g_poke_n && g_poke[ki].frame == frame){ sms_write8(g_poke[ki].addr, g_poke[ki].val); ki++; }
+    while (pi < g_press_n && g_press[pi].frame <= frame){ m = g_press[pi].mask; pi++; }
     return m;   /* the latest directive at/under the current frame wins */
 }
 
@@ -215,6 +269,18 @@ int main(int argc, char **argv){
             cyc_watch_addr = (uint16_t)strtoul(argv[++i],NULL,0); cyc_watch_file = argv[++i]; }
 #endif
         else if (strcmp(argv[i],"--press")==0 && i+1<argc) press_add(argv[++i]);
+        else if (strcmp(argv[i],"--poke")==0 && i+1<argc) poke_add(argv[++i]);
+        else if (strcmp(argv[i],"--poke-file")==0 && i+1<argc){   /* one FRAME:ADDR=VAL per line, # comments */
+            FILE *pf=fopen(argv[++i],"r"); char ln[128];
+            if (!pf){ fprintf(stderr,"[runner] cannot open poke file\n"); return 2; }
+            while (fgets(ln,sizeof ln,pf)){ if (ln[0]>='0' && ln[0]<='9'){ ln[strcspn(ln,"\r\n")]=0; poke_add(ln); } }
+            fclose(pf); }
+        else if (strcmp(argv[i],"--speed")==0 && i+1<argc) g_speed_opt = atof(argv[++i]);
+        else if (strcmp(argv[i],"--press-file")==0 && i+1<argc){   /* one FRAME:KEYS per line, # comments */
+            FILE *pf=fopen(argv[++i],"r"); char ln[128];
+            if (!pf){ fprintf(stderr,"[runner] cannot open press file\n"); return 2; }
+            while (fgets(ln,sizeof ln,pf)){ if (ln[0]>='0' && ln[0]<='9'){ ln[strcspn(ln,"\r\n")]=0; press_add(ln); } }
+            fclose(pf); }
         else if (strcmp(argv[i],"--route")==0 && i+1<argc) route=argv[++i];
         else if (strcmp(argv[i],"--report")==0 && i+1<argc) report=argv[++i];
         else if (strcmp(argv[i],"--window")==0){
@@ -255,6 +321,9 @@ int main(int argc, char **argv){
             frames ? "to frame limit" : "until window close");
 
     glue_init(is_gg, frames);
+#ifdef SMSGG_HAVE_GAME_LAYOUT
+    if (g_game_spec.on_post_reset) g_game_spec.on_post_reset();   /* per-game hook: ROM loaded, CPU reset */
+#endif
     if (route){
         g_automated_input=true;
         glue_set_boundary_callback(coverage_route_frame);
@@ -270,7 +339,7 @@ int main(int argc, char **argv){
         fprintf(stderr,"[runner] cyc-watch anchor=0x%04X -> %s\n", cyc_watch_addr, cyc_watch_file);
     }
 #endif
-    if (g_press_n){
+    if (g_press_n || g_poke_n){
         g_automated_input=true;
         glue_set_input_cb(press_provider);
         fprintf(stderr,"[runner] scripted input: %d directive(s)\n", g_press_n);
@@ -282,15 +351,18 @@ int main(int argc, char **argv){
         /* SMS shows the full 256x192; GG shows a 160x144 centred crop. */
         host_set_internal_scale(internal_scale);
         host_set_hidden(hidden);
+        char win_title[160];
+        snprintf(win_title, sizeof win_title, "%s - recompiled", g_game_spec.display_name);
         int cx = is_gg ? (SMS_SCREEN_W-GG_SCREEN_W)/2 : 0;
         int cy = is_gg ? (SMS_SCREEN_H-GG_SCREEN_H)/2 : 0;
         int cw = is_gg ? GG_SCREEN_W : SMS_SCREEN_W;
         int ch = is_gg ? GG_SCREEN_H : SMS_SCREEN_H;
         if (host_init(SMS_SCREEN_W, SMS_SCREEN_H, cx, cy, cw, ch, win_scale,
-                      is_gg ? "Sonic (GG) - recompiled" : "Sonic 1 (SMS) - recompiled")){
+                      win_title)){
             glue_set_frame_callback(sdl_frame_cb);
             glue_set_native_output(!host_uses_gpu());
             host_set_frame_cap(g_benchmark ? 0 : glue_frame_rate());
+            host_set_speed(g_speed_opt);
         } else
             fprintf(stderr,"[runner] SDL window init failed; running headless\n");
 #else
@@ -320,6 +392,7 @@ int main(int argc, char **argv){
     } else {
         glue_run();
     }
+    glue_sram_flush();
 
     if (benchmark_out){
         FILE *f=fopen(benchmark_out,"w");

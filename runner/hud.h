@@ -31,12 +31,18 @@ void hud_set_info(int (*info)(char lines[][41], int max));
 /* Called when the HUD closes (e.g. to save the settings file). */
 void hud_set_on_close(void (*on_close)(void));
 
-/* Extra pages (tabs) after the built-in OPTIONS page, e.g. a map (up to 4). `draw` paints the page
- * body into the box (x0,y0)-(x1,y1) of the w x h frame; `key` (may be NULL) receives HUD_KEY_UP /
- * HUD_KEY_DOWN while the page is shown. Pages switch with Left/Right on the tab row (options page:
- * Up from the first option), directly with Left/Right on other pages, or HUD_KEY_PAGE_PREV/NEXT. */
+/* Extra pages (tabs) after the built-in OPTIONS page, in the order added (up to 5).
+ * Option page: a list of options like the OPTIONS page, with its own selection.
+ * Drawn page (e.g. a map): `draw` paints the page body into the box (x0,y0)-(x1,y1) of the w x h
+ * frame; `key` (may be NULL) receives HUD_KEY_UP / HUD_KEY_DOWN while the page is shown, and with
+ * `own_lr` also HUD_KEY_LEFT / HUD_KEY_RIGHT (then only HUD_KEY_PAGE_PREV/NEXT leave the page).
+ * Pages switch with Left/Right on the tab row (option pages: Up from the first option), directly
+ * with Left/Right on drawn pages without own_lr, or HUD_KEY_PAGE_PREV/NEXT (LB/RB, Q/E). */
 typedef void (*HudPageDraw)(uint32_t *fb, int w, int h, int x0, int y0, int x1, int y1);
 void hud_add_page(const char *name, HudPageDraw draw, void (*key)(int key));
+void hud_add_page_ex(const char *name, HudPageDraw draw, void (*key)(int key), bool own_lr);
+void hud_add_option_page(const char *name, const HudOption *opts, int n);
+int  hud_current_page(void);                          /* page shown, -1 = HUD closed */
 /* Called each time the HUD opens: return the page to show (0 = options, 1.. = added pages), or -1
  * to keep the last one (e.g. Phantasy Star opens on the map page inside a dungeon). */
 void hud_set_open_page(int (*f)(void));

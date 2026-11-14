@@ -143,57 +143,75 @@ void hud_rect(int space, float x, float y, float w, float h, uint32_t argb){
 const HudLayer *hud_layers(int *n){ *n = s_nlayers; return s_layers; }
 void hud_layers_clear(void){ s_nlayers = 0; }
 
-/* ---- state ---- */
-static const char      *s_title = "SETTINGS";
-static const HudOption *s_opts;
-static int              s_nopts;
-static int            (*s_info)(char lines[][41], int max);
-static void           (*s_on_close)(void);
-static bool             s_open;
-static int              s_sel;          /* options page: -1 = tab row (only when pages exist) */
-#define MAX_PAGES 4
-static const char      *s_page_name[MAX_PAGES];
-static HudPageDraw      s_page_draw[MAX_PAGES];
-static void           (*s_page_key[MAX_PAGES])(int key);
-static int              s_npages;       /* extra pages; page 0 = options */
-static int              s_page;
-static int            (*s_open_page)(void);
+/* ---- state ----
+ * Page 0 = the main options (hud_set_options); further pages are option pages (hud_add_option_page)
+ * or drawn pages (hud_add_page / hud_add_page_ex). Option pages keep their own selection; -1 = the
+ * tab row (only when there is more than one page). */
+#define MAX_PAGES 6
+typedef struct {
+    const char      *name;
+    const HudOption *opts; int nopts; int sel;     /* option page */
+    HudPageDraw      draw;                         /* drawn page (NULL for option pages) */
+    void           (*key)(int key);
+    bool             own_lr;                       /* drawn page takes Left/Right too */
+} HudPage;
+static const char *s_title = "SETTINGS";
+static int       (*s_info)(char lines[][41], int max);
+static void      (*s_on_close)(void);
+static bool        s_open;
+static HudPage     s_pages[MAX_PAGES] = { { "OPTIONS" } };
+static int         s_npages = 1;                   /* including page 0 */
+static int         s_page;
+static int       (*s_open_page)(void);
 
 void hud_set_title(const char *t){ s_title = t ? t : "SETTINGS"; }
-void hud_set_options(const HudOption *o, int n){ s_opts = o; s_nopts = n; if (s_sel >= n) s_sel = 0; }
+void hud_set_options(const HudOption *o, int n){ s_pages[0].opts = o; s_pages[0].nopts = n; if (s_pages[0].sel >= n) s_pages[0].sel = 0; }
 void hud_set_info(int (*info)(char lines[][41], int max)){ s_info = info; }
 void hud_set_on_close(void (*f)(void)){ s_on_close = f; }
 bool hud_is_open(void){ return s_open; }
-void hud_add_page(const char *name, HudPageDraw draw, void (*key)(int key)){
-    if (s_npages >= MAX_PAGES || !draw) return;
-    s_page_name[s_npages] = name; s_page_draw[s_npages] = draw; s_page_key[s_npages] = key; s_npages++;
+static HudPage *new_page(const char *name){
+    if (s_npages >= MAX_PAGES) return NULL;
+    HudPage *p = &s_pages[s_npages++]; memset(p, 0, sizeof *p); p->name = name; return p;
+}
+void hud_add_page_ex(const char *name, HudPageDraw draw, void (*key)(int key), bool own_lr){
+    if (!draw) return;
+    HudPage *p = new_page(name); if (!p) return;
+    p->draw = draw; p->key = key; p->own_lr = own_lr && key;
+}
+void hud_add_page(const char *name, HudPageDraw draw, void (*key)(int key)){ hud_add_page_ex(name, draw, key, false); }
+void hud_add_option_page(const char *name, const HudOption *opts, int n){
+    HudPage *p = new_page(name); if (!p) return;
+    p->opts = opts; p->nopts = n;
 }
 void hud_set_open_page(int (*f)(void)){ s_open_page = f; }
+int  hud_current_page(void){ return s_open ? s_page : -1; }
 
-static void page_step(int d){ s_page = (s_page + d + s_npages + 1) % (s_npages + 1); }
+static void page_step(int d){ s_page = (s_page + d + s_npages) % s_npages; }
 
 void hud_key(int key){
     if (key == HUD_KEY_TOGGLE || (key == HUD_KEY_CLOSE && s_open)){
         s_open = !s_open;
         if (!s_open && s_on_close) s_on_close();
-        if (s_open && s_open_page){ int p = s_open_page(); if (p >= 0 && p <= s_npages) s_page = p; }
+        if (s_open && s_open_page){ int p = s_open_page(); if (p >= 0 && p < s_npages) s_page = p; }
         return;
     }
     if (!s_open) return;
-    if (key == HUD_KEY_PAGE_PREV || key == HUD_KEY_PAGE_NEXT){ if (s_npages) page_step(key == HUD_KEY_PAGE_NEXT ? 1 : -1); return; }
-    if (s_page > 0){                                   /* an added page: L/R = page, U/D = the page's own */
-        if (key == HUD_KEY_LEFT || key == HUD_KEY_RIGHT) page_step(key == HUD_KEY_RIGHT ? 1 : -1);
-        else if ((key == HUD_KEY_UP || key == HUD_KEY_DOWN) && s_page_key[s_page - 1]) s_page_key[s_page - 1](key);
+    if (key == HUD_KEY_PAGE_PREV || key == HUD_KEY_PAGE_NEXT){ if (s_npages > 1) page_step(key == HUD_KEY_PAGE_NEXT ? 1 : -1); return; }
+    HudPage *pg = &s_pages[s_page];
+    bool lr = key == HUD_KEY_LEFT || key == HUD_KEY_RIGHT;
+    if (pg->draw){                                     /* drawn page: U/D (and L/R if it wants) = its own */
+        if (lr && !pg->own_lr) page_step(key == HUD_KEY_RIGHT ? 1 : -1);
+        else if (pg->key && (!lr || pg->own_lr) && (lr || key == HUD_KEY_UP || key == HUD_KEY_DOWN)) pg->key(key);
         return;
     }
-    int lo = s_npages ? -1 : 0;                        /* -1 = the tab row */
-    int n = s_nopts - lo;
+    int lo = s_npages > 1 ? -1 : 0;                    /* -1 = the tab row */
+    int n = pg->nopts - lo;
     if (n <= 0) return;
-    if (key == HUD_KEY_UP)   s_sel = (s_sel - lo + n - 1) % n + lo;
-    if (key == HUD_KEY_DOWN) s_sel = (s_sel - lo + 1) % n + lo;
-    if ((key == HUD_KEY_LEFT || key == HUD_KEY_RIGHT) && s_sel < 0){ page_step(key == HUD_KEY_RIGHT ? 1 : -1); return; }
-    if ((key == HUD_KEY_LEFT || key == HUD_KEY_RIGHT) && s_nopts > 0){
-        const HudOption *o = &s_opts[s_sel];
+    if (key == HUD_KEY_UP)   pg->sel = (pg->sel - lo + n - 1) % n + lo;
+    if (key == HUD_KEY_DOWN) pg->sel = (pg->sel - lo + 1) % n + lo;
+    if (lr && pg->sel < 0){ page_step(key == HUD_KEY_RIGHT ? 1 : -1); return; }
+    if (lr && pg->nopts > 0){
+        const HudOption *o = &pg->opts[pg->sel];
         if (!o->value || o->nchoices <= 0) return;
         int v = *o->value + (key == HUD_KEY_RIGHT ? 1 : -1);
         if (v < 0) v = 0;
@@ -223,37 +241,39 @@ void hud_fill(uint32_t *fb, int w, int h, int x0, int y0, int x1, int y1, uint32
 void hud_draw(uint32_t *fb, int w, int h){
     if (!s_open) return;
     const uint32_t WHITE = 0xFFFFFFFF, GREY = 0xFFA0A0B0, YEL = 0xFFFFE040, CYAN = 0xFF60D0FF;
+    const HudPage *pg = &s_pages[s_page];
     char info[8][41]; int ninfo = (s_page == 0 && s_info) ? s_info(info, 8) : 0;
-    int rows = 2 + (s_npages ? 1 : 0) + (s_nopts > 0 ? s_nopts : 1) + (ninfo ? ninfo + 1 : 0) + 2;
+    int rows = 2 + (s_npages > 1 ? 1 : 0) + (pg->nopts > 0 ? pg->nopts : 1) + (ninfo ? ninfo + 1 : 0) + 2;
     int x0 = 8, x1 = w - 8, y0 = 8, y1 = y0 + rows * 10 + 6;
-    if (s_page > 0 || y1 > h - 4) y1 = h - 4;          /* added pages use the full height */
+    if (pg->draw || y1 > h - 4) y1 = h - 4;            /* drawn pages use the full height */
     fill(fb, w, h, x0, y0, x1, y1, 0xFF101830, true);
     fill(fb, w, h, x0, y0, x1, y0 + 1, CYAN, false); fill(fb, w, h, x0, y1 - 1, x1, y1, CYAN, false);
     fill(fb, w, h, x0, y0, x0 + 1, y1, CYAN, false); fill(fb, w, h, x1 - 1, y0, x1, y1, CYAN, false);
     int y = y0 + 5;
     hud_text(fb, w, h, x0 + 6, y, s_title, CYAN); y += 14;
-    if (s_npages){                                       /* tab row: OPTIONS | page names */
+    if (s_npages > 1){                                   /* tab row */
         int x = x0 + 12;
-        bool on_tabs = (s_page > 0) || s_sel < 0;
-        if (s_page == 0 && s_sel < 0) hud_text(fb, w, h, x0 + 4, y, ">", YEL);
-        for (int p = 0; p <= s_npages; p++){
-            const char *nm = p ? s_page_name[p - 1] : "OPTIONS";
+        bool on_tabs = pg->draw ? !pg->own_lr : pg->sel < 0;
+        if (!pg->draw && pg->sel < 0) hud_text(fb, w, h, x0 + 4, y, ">", YEL);
+        for (int p = 0; p < s_npages; p++){
+            const char *nm = s_pages[p].name;
             uint32_t c = (p == s_page) ? (on_tabs ? YEL : WHITE) : GREY;
             if (p == s_page) fill(fb, w, h, x - 2, y + 8, x + 6 * (int)strlen(nm), y + 9, c, false);
             x = hud_text(fb, w, h, x, y, nm, c) + 10;
         }
         y += 14;
     }
-    if (s_page > 0){
-        s_page_draw[s_page - 1](fb, w, h, x0 + 4, y, x1 - 4, y1 - 14);
-        hud_text(fb, w, h, x0 + 6, y1 - 12, "LEFT/RIGHT PAGE   F1/BACK CLOSE", GREY);
+    if (pg->draw){
+        pg->draw(fb, w, h, x0 + 4, y, x1 - 4, y1 - 14);
+        hud_text(fb, w, h, x0 + 6, y1 - 12, pg->own_lr ? "LB/RB (Q/E) PAGE   F1/BACK CLOSE"
+                                                       : "LEFT/RIGHT PAGE   F1/BACK CLOSE", GREY);
         return;
     }
-    if (s_nopts <= 0){ hud_text(fb, w, h, x0 + 6, y, "NO OPTIONS FOR THIS GAME", GREY); y += 10; }
-    for (int i = 0; i < s_nopts; i++, y += 10){
-        const HudOption *o = &s_opts[i];
-        uint32_t c = (i == s_sel) ? YEL : WHITE;
-        if (i == s_sel) hud_text(fb, w, h, x0 + 4, y, ">", YEL);
+    if (pg->nopts <= 0){ hud_text(fb, w, h, x0 + 6, y, "NO OPTIONS FOR THIS GAME", GREY); y += 10; }
+    for (int i = 0; i < pg->nopts; i++, y += 10){
+        const HudOption *o = &pg->opts[i];
+        uint32_t c = (i == pg->sel) ? YEL : WHITE;
+        if (i == pg->sel) hud_text(fb, w, h, x0 + 4, y, ">", YEL);
         hud_text(fb, w, h, x0 + 12, y, o->label, c);
         if (o->value && o->nchoices > 0){
             int v = *o->value; if (v < 0) v = 0; if (v >= o->nchoices) v = o->nchoices - 1;
@@ -265,6 +285,6 @@ void hud_draw(uint32_t *fb, int w, int h){
         y += 4;
         for (int i = 0; i < ninfo; i++, y += 10) hud_text(fb, w, h, x0 + 12, y, info[i], GREY);
     }
-    hud_text(fb, w, h, x0 + 6, y1 - 12, s_sel < 0 ? "LEFT/RIGHT PAGE   UP/DOWN SELECT"
-                                                 : "UP/DOWN SELECT   LEFT/RIGHT CHANGE", GREY);
+    hud_text(fb, w, h, x0 + 6, y1 - 12, pg->sel < 0 ? "LEFT/RIGHT PAGE   UP/DOWN SELECT"
+                                                    : "UP/DOWN SELECT   LEFT/RIGHT CHANGE", GREY);
 }

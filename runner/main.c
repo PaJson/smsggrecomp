@@ -57,6 +57,13 @@ static int benchmark_frame(const uint32_t *fb, int w, int h){
  * request shutdown (glue.c then unwinds the run loop). */
 static int sdl_frame_cb(const uint32_t *fb, int w, int h){
     if(g_benchmark)benchmark_frame(fb,w,h);
+    /* game overlay (hud_set_overlay): drawn on a copy, the emulator's frame stays untouched */
+    static uint32_t ovl[256 * 240];
+    if (fb && hud_has_overlay() && w * h <= (int)(sizeof ovl / sizeof ovl[0])){
+        memcpy(ovl, fb, (size_t)w * (size_t)h * sizeof(uint32_t));
+        hud_draw_overlay(ovl, w, h);
+        fb = ovl;
+    }
     bool keep = host_present(fb, w, h);
     /* Settings HUD (hud.c, F1 / pad Back): the emulation pauses here; the last frame is shown
      * with the overlay until the HUD is closed. Audio just runs dry (silence) meanwhile. */

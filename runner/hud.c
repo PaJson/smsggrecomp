@@ -171,6 +171,11 @@ static double s_turbo = 4.0;
 void   hud_set_turbo_speed(double mult){ s_turbo = (mult > 0.05) ? mult : 4.0; }
 double hud_turbo_speed(void){ return s_turbo; }
 
+static void (*s_overlay)(uint32_t *, int, int);
+void hud_set_overlay(void (*draw)(uint32_t *fb, int w, int h)){ s_overlay = draw; }
+bool hud_has_overlay(void){ return s_overlay != NULL; }
+void hud_draw_overlay(uint32_t *fb, int w, int h){ if (s_overlay) s_overlay(fb, w, h); }
+
 static uint8_t s_extra;
 uint8_t hud_extra_buttons(void){ return s_extra; }
 void    hud_set_extra_buttons(uint8_t mask){ s_extra = mask; }

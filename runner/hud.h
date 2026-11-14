@@ -63,6 +63,11 @@ enum { HUD_EXTRA_1 = 1, HUD_EXTRA_2 = 2 };
 uint8_t hud_extra_buttons(void);
 void    hud_set_extra_buttons(uint8_t mask);          /* host */
 double hud_turbo_speed(void);
+/* Overlay over the game picture while the HUD is closed (e.g. a status line "AUTO ATTACK: ON"):
+ * the host copies each presented frame and calls `draw` on the copy (it may draw nothing). */
+void hud_set_overlay(void (*draw)(uint32_t *fb, int w, int h));
+bool hud_has_overlay(void);
+void hud_draw_overlay(uint32_t *fb, int w, int h);    /* host */
 /* Rectangle helper for pages (blend: 25% of the frame shows through). */
 void hud_fill(uint32_t *fb, int w, int h, int x0, int y0, int x1, int y1, uint32_t argb, bool blend);
 

@@ -497,7 +497,9 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
         else if (hud_is_open() && e.type == SDL_KEYDOWN){
             if (e.key.repeat) continue;                 /* own repeat timer (nav_tick) */
             switch (e.key.keysym.sym){
-                case SDLK_ESCAPE: case SDLK_RETURN: case SDLK_z: case SDLK_x: hud_key(HUD_KEY_CLOSE); nav_clear(); break;
+                case SDLK_ESCAPE: case SDLK_z: case SDLK_BACKSPACE: hud_key(HUD_KEY_CLOSE); nav_clear(); break;
+                case SDLK_RETURN: case SDLK_SPACE: case SDLK_x:          /* confirm (X = the game's button 2) */
+                    hud_key(HUD_KEY_SELECT); if (!hud_is_open()) nav_clear(); break;
                 case SDLK_q: case SDLK_PAGEUP:   hud_key(HUD_KEY_PAGE_PREV); break;   /* HUD pages (tabs) */
                 case SDLK_e: case SDLK_PAGEDOWN: hud_key(HUD_KEY_PAGE_NEXT); break;
                 default: nav_set(key_nav_dir(e.key.keysym.sym), NAV_KEY, true); break;
@@ -506,7 +508,9 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
         else if (hud_is_open() && e.type == SDL_KEYUP) nav_set(key_nav_dir(e.key.keysym.sym), NAV_KEY, false);
         else if (hud_is_open() && e.type == SDL_CONTROLLERBUTTONDOWN){
             switch (e.cbutton.button){
-                case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_START: hud_key(HUD_KEY_CLOSE); nav_clear(); break;
+                case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_START: hud_key(HUD_KEY_CLOSE); nav_clear(); break;
+                case SDL_CONTROLLER_BUTTON_B:                    /* confirm (B = the game's button 2) */
+                    hud_key(HUD_KEY_SELECT); if (!hud_is_open()) nav_clear(); break;
                 case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  hud_key(HUD_KEY_PAGE_PREV); break;
                 case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: hud_key(HUD_KEY_PAGE_NEXT); break;
                 default: nav_set(pad_nav_dir(e.cbutton.button), NAV_DPAD, true); break;

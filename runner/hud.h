@@ -4,7 +4,8 @@
  * Generic: a game's hook code (e.g. Common/PhantasyStar/ps_qol.c, from its on_post_reset hook)
  * registers options; the runner draws them over the 256x192 frame with a built-in 5x7 font and
  * pauses the emulation while the HUD is open. Open/close: F1 (keyboard) or Back/Select (gamepad).
- * Inside: Up/Down select, Left/Right change, Enter/Esc/F1 (pad: A/B/Back) close; pages: Left/Right
+ * Inside: Up/Down select, Left/Right change, Esc/Z/F1 (pad: A/Start/Back) close, Enter/Space/X (pad: B) confirm
+ * (pages that do not use it: close); pages: Left/Right
  * on the tab row, Q/E or PgUp/PgDn (pad: LB/RB).
  *
  * With nothing registered the HUD still opens (shows "no options"), so every game gets it.
@@ -51,7 +52,8 @@ void hud_fill(uint32_t *fb, int w, int h, int x0, int y0, int x1, int y1, uint32
 
 /* Host side. */
 enum { HUD_KEY_UP, HUD_KEY_DOWN, HUD_KEY_LEFT, HUD_KEY_RIGHT, HUD_KEY_CLOSE, HUD_KEY_TOGGLE,
-       HUD_KEY_PAGE_PREV, HUD_KEY_PAGE_NEXT };
+       HUD_KEY_PAGE_PREV, HUD_KEY_PAGE_NEXT,
+       HUD_KEY_SELECT };   /* confirm: goes to a drawn page with own_lr, elsewhere it closes the HUD */
 bool hud_is_open(void);
 void hud_key(int key);                               /* navigation / open-close */
 void hud_draw(uint32_t *fb, int w, int h);           /* draw over an ARGB frame */

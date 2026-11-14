@@ -138,6 +138,7 @@ static void emit_push_tag(FILE *o, uint16_t a){
     for (int i=0;i<G_NAMB;i++) if (G_AMB_PUSH[i]==a) fprintf(o,"    _ccsp_%04X = s->sp;   /* path-dependent push (see G_AMB_PUSH) */\n", G_AMB_JP[i]);
 }
 static const GameConfig *G_CFG;  /* for [insn_hooks] */
+static int G_IH_USED[64];        /* [insn_hooks] entry -> times emitted */
 /* Index of the [insn_hooks] entry at `a` for a function of bank `fbank`, or -1. */
 static int insn_hook_at(uint16_t a, int fbank){
     if (!G_CFG) return -1;
@@ -949,6 +950,7 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
         {   int h = insn_hook_at(a, fe->bank);
             if (h >= 0){
                 uint16_t rs = G_CFG->ih_resume[h];
+                if (h < 64) G_IH_USED[h]++;
                 if (tr_has(rs)) fprintf(o,"    if (%s()) goto L_%04X;   /* [insn_hooks] */\n", G_CFG->ih_func[h], rs);
                 else            fprintf(o,"    if (%s()) { call_by_address(0x%04X); return; }   /* [insn_hooks] */\n", G_CFG->ih_func[h], rs);
             }
@@ -1138,6 +1140,10 @@ void cg_emit(const SmsRom *rom, const FuncList *fl, const GameConfig *cfg, const
         emitted++;
     }
     fclose(o);
+    /* a hook address that is no instruction start of any recompiled function (e.g. the middle of an
+       instruction) would silently do nothing */
+    for (int h=0; h<cfg->ih_n && h<64; h++)
+        if (!G_IH_USED[h]) fprintf(stderr,"[cg_emit] ERROR: [insn_hooks] %s at 0x%04X is not an instruction of any recompiled function - hook NOT applied\n", cfg->ih_func[h], cfg->ih_addr[h]);
 
     snprintf(path,sizeof path,"%s/%s_dispatch.c", out_dir, pfx);
     write_dispatch(path, pfx, fl);

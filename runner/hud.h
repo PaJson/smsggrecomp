@@ -32,7 +32,7 @@ void hud_set_info(int (*info)(char lines[][41], int max));
 /* Called when the HUD closes (e.g. to save the settings file). */
 void hud_set_on_close(void (*on_close)(void));
 
-/* Extra pages (tabs) after the built-in OPTIONS page, in the order added (up to 5).
+/* Extra pages (tabs) after the built-in OPTIONS page, in the order added (up to 7).
  * Option page: a list of options like the OPTIONS page, with its own selection.
  * Drawn page (e.g. a map): `draw` paints the page body into the box (x0,y0)-(x1,y1) of the w x h
  * frame; `key` (may be NULL) receives HUD_KEY_UP / HUD_KEY_DOWN while the page is shown, and with
@@ -43,8 +43,13 @@ typedef void (*HudPageDraw)(uint32_t *fb, int w, int h, int x0, int y0, int x1, 
 void hud_add_page(const char *name, HudPageDraw draw, void (*key)(int key));
 void hud_add_page_ex(const char *name, HudPageDraw draw, void (*key)(int key), bool own_lr);
 void hud_add_option_page(const char *name, const HudOption *opts, int n);
-int  hud_current_page(void);                          /* page shown, -1 = HUD closed */
-/* Called each time the HUD opens: return the page to show (0 = options, 1.. = added pages), or -1
+int  hud_current_page(void);                          /* page shown (tab index), -1 = HUD closed */
+/* Tab order by page name (the built-in page is "OPTIONS"); pages not named keep their order after
+ * the named ones. Page indices (hud_current_page, hud_page_index, open page) follow the new order.
+ * The tab row scrolls (selected tab centred) when the names do not fit. */
+void hud_set_page_order(const char *const *names, int n);
+int  hud_page_index(const char *name);                /* tab index of a page, -1 = none */
+/* Called each time the HUD opens: return the page to show (tab index, see hud_page_index), or -1
  * to keep the last one (e.g. Phantasy Star opens on the map page inside a dungeon). */
 void hud_set_open_page(int (*f)(void));
 /* Rectangle helper for pages (blend: 25% of the frame shows through). */

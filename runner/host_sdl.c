@@ -475,6 +475,7 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
     bool panel = hud_panel_active();
     if (panel != g_panel_on) panel_layout(panel);
     SDL_UpdateTexture(g_tex, NULL, fb, fb_w * (int)sizeof(uint32_t));
+    SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 255);       /* hi-res layers leave their colour set */
     SDL_RenderClear(g_ren);
     if (panel && g_panel_tex){
         SDL_Rect game = { 0, 0, g_src.w * 3, g_src.h * 3 }, side = { g_src.w * 3, 0, HUD_PANEL_W, HUD_PANEL_H };

@@ -199,10 +199,14 @@ static bool        s_open;
 static HudPage     s_pages[MAX_PAGES] = { { "OPTIONS" } };
 static int         s_npages = 1;                   /* including page 0 */
 static int         s_page;
+static int         s_main;                         /* tab index of the built-in OPTIONS page */
 static int       (*s_open_page)(void);
 
 void hud_set_title(const char *t){ s_title = t ? t : "SETTINGS"; }
-void hud_set_options(const HudOption *o, int n){ s_pages[0].opts = o; s_pages[0].nopts = n; if (s_pages[0].sel >= n) s_pages[0].sel = 0; }
+void hud_set_options(const HudOption *o, int n){
+    HudPage *p = &s_pages[s_main];
+    p->opts = o; p->nopts = n; if (p->sel >= n) p->sel = 0;
+}
 void hud_set_info(int (*info)(char lines[][41], int max)){ s_info = info; }
 void hud_set_on_close(void (*f)(void)){ s_on_close = f; }
 bool hud_is_open(void){ return s_open; }
@@ -221,6 +225,28 @@ void hud_add_option_page(const char *name, const HudOption *opts, int n){
     p->opts = opts; p->nopts = n;
 }
 void hud_set_open_page(int (*f)(void)){ s_open_page = f; }
+int hud_page_index(const char *name){
+    for (int i = 0; name && i < s_npages; i++) if (!strcmp(s_pages[i].name, name)) return i;
+    return -1;
+}
+void hud_set_page_order(const char *const *names, int n){
+    HudPage out[MAX_PAGES]; bool used[MAX_PAGES] = { false }; int k = 0, main = s_main, cur = s_page;
+    for (int j = 0; j < n; j++){
+        int i = hud_page_index(names[j]);
+        if (i < 0 || used[i]) continue;
+        used[i] = true; out[k] = s_pages[i];
+        if (i == main) s_main = k;
+        if (i == cur) s_page = k;
+        k++;
+    }
+    for (int i = 0; i < s_npages; i++) if (!used[i]){
+        out[k] = s_pages[i];
+        if (i == main) s_main = k;
+        if (i == cur) s_page = k;
+        k++;
+    }
+    memcpy(s_pages, out, sizeof(HudPage) * (size_t)s_npages);
+}
 int  hud_current_page(void){ return s_open ? s_page : -1; }
 
 static void page_step(int d){ s_page = (s_page + d + s_npages) % s_npages; }
@@ -284,7 +310,7 @@ void hud_draw(uint32_t *fb, int w, int h){
     if (!s_open) return;
     const uint32_t WHITE = 0xFFFFFFFF, GREY = 0xFFA0A0B0, YEL = 0xFFFFE040, CYAN = 0xFF60D0FF;
     const HudPage *pg = &s_pages[s_page];
-    char info[8][41]; int ninfo = (s_page == 0 && s_info) ? s_info(info, 8) : 0;
+    char info[8][41]; int ninfo = (s_page == s_main && s_info) ? s_info(info, 8) : 0;
     int rows = 2 + (s_npages > 1 ? 1 : 0) + (pg->nopts > 0 ? pg->nopts : 1) + (ninfo ? ninfo + 1 : 0) + 2;
     int x0 = 8, x1 = w - 8, y0 = 8, y1 = y0 + rows * 10 + 6;
     if (pg->draw || y1 > h - 4) y1 = h - 4;            /* drawn pages use the full height */
@@ -294,14 +320,41 @@ void hud_draw(uint32_t *fb, int w, int h){
     int y = y0 + 5;
     hud_text(fb, w, h, x0 + 6, y, s_title, CYAN); y += 14;
     if (s_npages > 1){                                   /* tab row */
-        int x = x0 + 12;
         bool on_tabs = pg->draw ? !pg->own_lr : pg->sel < 0;
         if (!pg->draw && pg->sel < 0) hud_text(fb, w, h, x0 + 4, y, ">", YEL);
+        /* tabs on a strip; when it is wider than the row it scrolls so that the selected tab is
+           centred (clamped at both ends), whole characters only, a triangle marks hidden tabs */
+        int pos[MAX_PAGES], total = 0;
+        for (int p = 0; p < s_npages; p++){ pos[p] = total; total += 6 * (int)strlen(s_pages[p].name) + 10; }
+        total -= 10;
+        int L = x0 + 12, R = x1 - 6, off = 0;
+        bool scroll = total > R - L;
+        if (scroll){
+            L += 7; R -= 7;
+            int sw = 6 * (int)strlen(s_pages[s_page].name);
+            off = pos[s_page] + sw / 2 - (R - L) / 2;
+            if (off > total - (R - L)) off = total - (R - L);
+            if (off < 0) off = 0;
+        }
         for (int p = 0; p < s_npages; p++){
             const char *nm = s_pages[p].name;
             uint32_t c = (p == s_page) ? (on_tabs ? YEL : WHITE) : GREY;
-            if (p == s_page) fill(fb, w, h, x - 2, y + 8, x + 6 * (int)strlen(nm), y + 9, c, false);
-            x = hud_text(fb, w, h, x, y, nm, c) + 10;
+            int x = L + pos[p] - off, ux0 = x - 2, ux1 = x + 6 * (int)strlen(nm);
+            for (const char *s = nm; *s; s++, x += 6){
+                if (x < L || x + 5 > R) continue;
+                char ch[2] = { *s, 0 }; hud_text(fb, w, h, x, y, ch, c);
+            }
+            if (p == s_page){
+                if (ux0 < L - 2) ux0 = L - 2;
+                if (ux1 > R) ux1 = R;
+                if (ux1 > ux0) fill(fb, w, h, ux0, y + 8, ux1, y + 9, c, false);
+            }
+        }
+        if (scroll){                                     /* 3 x 5 triangles = more tabs that way */
+            for (int i = 0; i < 3; i++){
+                if (off > 0) fill(fb, w, h, L - 6 + i, y + 3 - i, L - 5 + i, y + 4 + i, CYAN, false);
+                if (off < total - (R - L)) fill(fb, w, h, R + 5 - i, y + 3 - i, R + 6 - i, y + 4 + i, CYAN, false);
+            }
         }
         y += 14;
     }

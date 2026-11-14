@@ -4,8 +4,8 @@
  * Generic: a game's hook code (e.g. Common/PhantasyStar/ps_qol.c, from its on_post_reset hook)
  * registers options; the runner draws them over the 256x192 frame with a built-in 5x7 font and
  * pauses the emulation while the HUD is open. Open/close: F1 (keyboard); gamepad: Start on SMS games
- * with a side panel (Back then toggles the panel, as F2 does), else Back/Select (Start belongs to
- * the Game Gear game; the SMS Pause button is not emulated).
+ * (the SMS Pause button is not emulated), Back/Select on Game Gear games (Start is the game's);
+ * Back toggles the side panel in games that have one (as F2 does), otherwise it opens the HUD.
  * Inside: Up/Down select, Left/Right change, Esc/Z/F1 (pad: A/Start) close, Enter/Space/X (pad: B) confirm
  * (pages that do not use it: close); pages: Left/Right
  * on the tab row, Q/E or PgUp/PgDn (pad: LB/RB).
@@ -97,10 +97,12 @@ bool hud_panel_active(void);                          /* registered and enabled 
  * game can keep its own setting in step. */
 void hud_toggle_panel(void);
 void hud_set_on_panel_toggle(void (*cb)(bool on));
-/* Pad mapping: Start opens the HUD and Back toggles the panel when the host says Start is free
- * (SMS: the Pause button is not emulated) and a panel is registered; otherwise Back opens the HUD. */
+/* Pad mapping: Start opens the HUD when the host says Start is free (SMS: the Pause button is not
+ * emulated); Back toggles the side panel when a game registered one, otherwise Back opens the HUD
+ * too (Game Gear: Start is the game's, Back = HUD). */
 void hud_set_start_free(bool free);                   /* host */
 bool hud_start_opens(void);
+bool hud_has_panel(void);
 void hud_panel_render(uint32_t *buf, int w, int h);   /* host: fill the panel image */
 
 /* High-resolution layers: images and rectangles the SDL host draws at the window's REAL pixel

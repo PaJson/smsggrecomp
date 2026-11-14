@@ -534,7 +534,7 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
             SDL_SetWindowFullscreen(g_win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
         }
         else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK){
-            if (hud_start_opens()) hud_toggle_panel(); else hud_toggle();
+            if (hud_start_opens() && hud_has_panel()) hud_toggle_panel(); else hud_toggle();
         }
         else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_START && hud_start_opens()) hud_toggle();
         else if (hud_is_open() && e.type == SDL_KEYDOWN){

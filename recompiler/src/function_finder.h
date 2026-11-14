@@ -71,6 +71,7 @@ typedef struct {
     uint16_t   *labels; int label_count, label_cap;   /* internal jump targets */
     bool        truncated;                              /* hit unmapped/illegal */
     const SmsRom *rom; int bank;                        /* set by trace_function (for look-ahead at jump targets) */
+    bool        complete;                               /* tracing finished, insns sorted by address */
 } TraceResult;
 
 /* Trace one function body from `start`, following fall-through and intra-

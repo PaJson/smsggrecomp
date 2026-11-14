@@ -466,6 +466,7 @@ static bool push_feeds_call(const TraceResult *t, int i){
  * `ret` resumes at (same contract as a computed call). */
 static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont,
                           uint16_t *tgt_addr, bool *has_tgt);
+static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1);
 bool trace_ret_jump(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont){
     uint16_t tg; bool ht; return ret_jump_scan(t, ret_addr, cont_addr, has_cont, &tg, &ht);
 }
@@ -522,7 +523,14 @@ static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *con
             fidx[found]=i; fpreg[found]=preg; found++;
         }
     }
-    if (found==0) return false;
+    bool via_df=false;
+    if (found==0){                                    /* not in this block: cross-block dataflow */
+        int s0, s1;
+        if (!ret_dataflow(t, ri, &s0, &s1)) return false;
+        fidx[0]=s0; fpreg[0]=push_reg(&t->insns[s0].insn); found=1;
+        if (s1>=0){ fidx[1]=s1; fpreg[1]=push_reg(&t->insns[s1].insn); found=2; }
+        via_df=true;
+    }
     g_rj_push = t->insns[fidx[0]].addr;
     for (int j=fidx[0]-1; j>=0; j--){                 /* resolve the target push to a constant */
         const Z80Insn *ld=&t->insns[j].insn;
@@ -533,6 +541,17 @@ static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *con
         if (lr==fpreg[0] && ld->imm_bits==16){ *tgt_addr=ld->imm; *has_tgt=true; break; }
         if (insn_writes_rp(ld, fpreg[0])) break;
         if ((uint16_t)(t->insns[j].addr + ld->length) != t->insns[j+1].addr) break;   /* stay in the block */
+    }
+    if (via_df && !*has_tgt) return false;           /* dataflow: constant targets only */
+    if (via_df && getenv("SMSREC_DF_LOG")){
+        static uint32_t seen[4096]; static int nseen;
+        uint32_t key = ((uint32_t)t->start << 16) | ret_addr; bool dup=false;
+        for (int k=0;k<nseen;k++) if (seen[k]==key){ dup=true; break; }
+        if (!dup && nseen<4096){ seen[nseen++]=key;
+            fprintf(stderr,"[df] func %04X bank %d: ret %04X -> push %04X (pfx %d op %02X, idx %d of %d) target %04X", t->start, t->bank, ret_addr, t->insns[fidx[0]].addr,
+                    t->insns[fidx[0]].insn.prefix, t->insns[fidx[0]].insn.opcode, fidx[0], t->insn_count, *tgt_addr);
+            if (found==2) fprintf(stderr," (below: push %04X)", t->insns[fidx[1]].addr);
+            fprintf(stderr,"\n"); }
     }
     if (found==2){
         for (int j=fidx[1]-1; j>=0; j--){
@@ -547,6 +566,115 @@ static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *con
     }
     return true;
 }
+
+/* ---- stack-shape dataflow (cross-block `push target ; ... ; ret`) ----
+ * Golvellius $215F: `ld hl,$23E4 ; push hl ; call ... ; jp z,$2198 / $235B / $2234 / $22CE ;
+ * pop hl ; ret`: each direction body ends in a plain RET far from the push (other blocks, calls,
+ * balanced push/pop loops in between), so the block-local backward scan above sees nothing and
+ * the RET was emitted as a return: the C function returned to its caller with SP 2 too low and
+ * $23E4 never ran (screen scroll never finished). This forward analysis records, per instruction,
+ * the words this function has pushed (push sites, top last) along every path; a RET reached only
+ * with the same non-empty shape is a computed jump to the top word. Conservative: a path stops at
+ * any form the codegen treats specially (computed calls, trampolines, push+call, external or
+ * indirect jumps), at any unknown SP change, and when the caller's return address is popped;
+ * instructions reached by different shapes are UNKNOWN. Used only when the backward scan finds
+ * nothing, and only for a constant target (`ld rr,nn ; push rr`). */
+#define DF_MAXD 8
+typedef struct { int8_t depth; int16_t site[DF_MAXD]; } DfState;   /* depth -2 unvisited, -1 unknown */
+static int df_find(const TraceResult *t, uint16_t a){
+    int lo=0, hi=t->insn_count-1;                 /* insns are in address order */
+    while (lo<=hi){ int m=(lo+hi)/2; uint16_t x=t->insns[m].addr; if (x==a) return m; if (x<a) lo=m+1; else hi=m-1; }
+    return -1;
+}
+static bool df_merge(DfState *dst, const DfState *src){
+    if (src->depth==-2) return false;
+    if (dst->depth==-2){ *dst=*src; return true; }
+    if (dst->depth==-1) return false;
+    bool same = src->depth==dst->depth;
+    for (int k=0; same && k<dst->depth; k++) same = src->site[k]==dst->site[k];
+    if (same) return false;
+    dst->depth=-1; return true;
+}
+static bool is_pop(const Z80Insn *in){
+    if (in->prefix==Z80_PFX_NONE) return in->opcode==0xC1||in->opcode==0xD1||in->opcode==0xE1||in->opcode==0xF1;
+    return (in->prefix==Z80_PFX_DD || in->prefix==Z80_PFX_FD) && in->opcode==0xE1;
+}
+/* -> push-site insn indices on top (site0) and below it (site1, -1 = none) at the RET insns[ri] */
+static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1){
+    static const TraceResult *ck_t; static uint16_t ck_start; static int ck_n = -1, ck_ok, ck_bank; static DfState *ck_st;
+    static uint32_t ck_sum;
+    if (!t->complete) return false;                   /* during tracing: partial, unsorted */
+    int n=t->insn_count;
+    uint32_t sum=0;
+    for (int i=0;i<n;i++) sum = sum*31u + t->insns[i].addr*7u + t->insns[i].insn.opcode + (uint32_t)t->insns[i].insn.prefix*977u;
+    if (!(ck_t==t && ck_start==t->start && ck_bank==t->bank && ck_n==n && ck_sum==sum && ck_st)){
+        DfState *st = (DfState*)realloc(ck_st, sizeof(DfState)*(size_t)(n>0?n:1));
+        if (!st) return false;
+        ck_st=st; ck_t=t; ck_start=t->start; ck_bank=t->bank; ck_n=n; ck_sum=sum; ck_ok=0;
+        for (int i=0;i<n;i++) st[i].depth=-2;
+        int e = df_find(t, t->start);
+        if (e<0) return false;
+        st[e].depth=0;
+        bool changed=true;
+        for (int it=0; changed && it<64; it++){
+            changed=false;
+            for (int i=0;i<n;i++){
+                if (st[i].depth==-2) continue;
+                DfState s=st[i];
+                const Z80Insn *in=&t->insns[i].insn; uint16_t a=t->insns[i].addr;
+                if (s.depth>=0){
+                    int pr=push_reg(in);
+                    if (pr>=0){                       /* also `push cont ; call F`: see the CALL case */
+                        if (s.depth<DF_MAXD) s.site[s.depth++]=(int16_t)i; else s.depth=-1;
+                    }
+                    else if (is_pop(in)) { if (s.depth>0) s.depth--; else s.depth=-1; }
+                    else if (in->prefix==Z80_PFX_NONE && (in->opcode==0x33||in->opcode==0x3B||in->opcode==0xF9||in->opcode==0x31||in->opcode==0xE3)) s.depth=-1;
+                    else if ((in->prefix==Z80_PFX_DD||in->prefix==Z80_PFX_FD) && (in->opcode==0xF9||in->opcode==0xE3)) s.depth=-1;
+                }
+                uint16_t c;
+                bool ft=false; int tj=-1;
+                DfState alt; int aj=-1;                   /* second successor state (push+call) */
+                switch (in->cf){
+                case Z80_CF_NONE: case Z80_CF_RET_COND: ft=true; break;
+                case Z80_CF_CALL: case Z80_CF_CALL_COND:
+                    /* `ld rr,cont ; push rr ; call F` is decided at run time by the codegen: F returned
+                       normally (the word is still pushed: fall through) or F dropped its own return
+                       and RET'd into cont (the word is consumed: go to cont) */
+                    ft=true;
+                    if (trace_push_call(t, a, &c) && s.depth>=1){
+                        alt=s; alt.depth--; aj=df_find(t, c);
+                    }
+                    break;
+                case Z80_CF_JUMP:
+                    if (in->has_target && !trace_computed_call(t, a, &c) && !trace_trampoline_call(t, a, &c)) tj=df_find(t, in->target);
+                    break;
+                case Z80_CF_JUMP_COND:
+                    ft=true;
+                    if (in->has_target && !trace_computed_call(t, a, &c)) tj=df_find(t, in->target);
+                    break;
+                default: break;
+                }
+                if (ft){
+                    if (i+1<n && t->insns[i+1].addr==(uint16_t)(a+in->length)){ if (df_merge(&st[i+1], &s)) changed=true; }
+                }
+                if (tj>=0 && df_merge(&st[tj], &s)) changed=true;
+                if (aj>=0 && df_merge(&st[aj], &alt)) changed=true;
+            }
+        }
+        ck_ok = !changed;                             /* did not settle: never claim anything */
+        {   const char *dd = getenv("SMSREC_DF_DUMP");   /* debug: SMSREC_DF_DUMP=<hex start> */
+            if (dd && strtoul(dd, NULL, 16) == t->start)
+                for (int i=0;i<n;i++) fprintf(stderr, "[dfdump %04X] %04X cf %d depth %d top %04X\n", t->start, t->insns[i].addr,
+                        t->insns[i].insn.cf, st[i].depth, st[i].depth > 0 ? t->insns[st[i].site[st[i].depth-1]].addr : 0);
+        }
+    }
+    if (!ck_ok || ri<0 || ri>=n) return false;
+    const DfState *s=&ck_st[ri];
+    if (s->depth<1) return false;
+    *site0=s->site[s->depth-1]; *site1 = s->depth>=2 ? s->site[s->depth-2] : -1;
+    return true;
+}
+
 bool trace_trampoline_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr){
     if (!t->rom) return false;
     int ji=-1; for (int i=0;i<t->insn_count;i++) if (t->insns[i].addr==jp_addr){ ji=i; break; }
@@ -721,6 +849,7 @@ void trace_function(const SmsRom *rom, uint16_t start, int bank,
         while (j>=0 && out->insns[j].addr>key.addr){ out->insns[j+1]=out->insns[j]; j--; }
         out->insns[j+1]=key;
     }
+    out->complete=true;
 }
 void trace_free(TraceResult *t){ free(t->insns); free(t->labels); memset(t,0,sizeof(*t)); }
 bool trace_is_label(const TraceResult *t, uint16_t addr){

@@ -39,9 +39,10 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h);
  * refreshes (e.g. 2x on a 120 Hz monitor). */
 void host_set_frame_cap(double fps);
 
-/* Speed multiplier on top of the frame cap (1.0 = realtime). Holding TAB is a x4 turbo. */
+/* Speed multiplier on top of the frame cap (1.0 = realtime). Holding TAB is a turbo at
+ * hud_turbo_speed() (default x4). */
 void host_set_speed(double mult);
-/* True while running off realtime (speed != 1 or turbo): callers skip audio then. */
+/* True while running off realtime (the current speed, turbo included, is not 1). */
 bool host_fast_forward(void);
 
 void host_shutdown(void);

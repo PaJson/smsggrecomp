@@ -52,6 +52,15 @@ int  hud_page_index(const char *name);                /* tab index of a page, -1
 /* Called each time the HUD opens: return the page to show (tab index, see hud_page_index), or -1
  * to keep the last one (e.g. Phantasy Star opens on the map page inside a dungeon). */
 void hud_set_open_page(int (*f)(void));
+/* Fast-forward (hold TAB or the pad's right trigger): the speed multiplier while it is
+ * held (default 4; e.g. 0.5 = slow motion; the left trigger is always x0.5). A game may offer it as a HUD option. */
+void   hud_set_turbo_speed(double mult);
+/* Extra buttons for game features beyond the SMS pad (held state, read by the game each frame;
+ * not delivered while the HUD is open): HUD_EXTRA_1 = pad LB / key C, HUD_EXTRA_2 = pad RB / key V. */
+enum { HUD_EXTRA_1 = 1, HUD_EXTRA_2 = 2 };
+uint8_t hud_extra_buttons(void);
+void    hud_set_extra_buttons(uint8_t mask);          /* host */
+double hud_turbo_speed(void);
 /* Rectangle helper for pages (blend: 25% of the frame shows through). */
 void hud_fill(uint32_t *fb, int w, int h, int x0, int y0, int x1, int y1, uint32_t argb, bool blend);
 

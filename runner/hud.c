@@ -156,6 +156,14 @@ static int      s_nlayers;
 static bool     s_hires;
 bool hud_hires(void){ return s_hires; }
 void hud_set_hires(bool on){ s_hires = on; }
+
+static double s_turbo = 4.0;
+void   hud_set_turbo_speed(double mult){ s_turbo = (mult > 0.05) ? mult : 4.0; }
+double hud_turbo_speed(void){ return s_turbo; }
+
+static uint8_t s_extra;
+uint8_t hud_extra_buttons(void){ return s_extra; }
+void    hud_set_extra_buttons(uint8_t mask){ s_extra = mask; }
 void hud_image(int space, float x, float y, float w, float h, const uint32_t *img, int iw, int ih,
                int sx, int sy, int sw, int sh, bool wrap, uint32_t gen){
     if (!s_hires || !img || s_nlayers >= MAX_LAYERS || iw <= 0 || ih <= 0 || sw <= 0 || sh <= 0) return;

@@ -14,6 +14,7 @@
 extern void sms_write8(uint16_t addr, uint8_t val);
 #ifdef SMSGG_HAVE_GAME_LAYOUT
 #include "game_spec.h"
+#include "art.h"
 #endif
 #include <stdio.h>
 #include <string.h>
@@ -352,6 +353,10 @@ int main(int argc, char **argv){
         glue_set_input_cb(press_provider);
         fprintf(stderr,"[runner] scripted input: %d directive(s)\n", g_press_n);
     }
+
+#ifdef SMSGG_HAVE_GAME_LAYOUT
+    art_setup_game_logo(g_game_spec.display_name, glue_rom_path());   /* optional Images/<title> (logo).png */
+#endif
 
     if (want_window){
         (void)win_scale;   /* used only in the SDL block below */

@@ -3,8 +3,10 @@
  * the ARGB framebuffer that the host presents. No SDL dependency (the host forwards keys).
  */
 #include "hud.h"
+#include "art.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* ---- 5x7 font, ASCII 32..126 (lower case with descenders in an 8th row). Each glyph: 8 rows, bit 4 =
  * leftmost pixel. Drawn for this project (no external font data). */
@@ -188,6 +190,40 @@ void hud_image(int space, float x, float y, float w, float h, const uint32_t *im
     l->space = space; l->x = x; l->y = y; l->w = w; l->h = h;
     l->img = img; l->iw = iw; l->ih = ih; l->sx = sx; l->sy = sy; l->sw = sw; l->sh = sh; l->wrap = wrap; l->gen = gen;
 }
+void hud_image_alpha(int space, float x, float y, float w, float h, const uint32_t *img, int iw, int ih, uint32_t gen){
+    int n0 = s_nlayers;
+    hud_image(space, x, y, w, h, img, iw, ih, 0, 0, iw, ih, false, gen);
+    if (s_nlayers > n0) s_layers[n0].alpha = true;
+}
+
+/* ---- game logo (art.c finds it: Images/<title> (logo).png, outlined) ---- */
+static uint32_t *s_logo; static int s_logo_w, s_logo_h;
+static uint32_t *s_logo_small; static int s_logo_sw, s_logo_sh;    /* software copy at the last size */
+void hud_set_logo(uint32_t *img, int w, int h){
+    free(s_logo); free(s_logo_small); s_logo_small = NULL; s_logo_sw = s_logo_sh = 0;
+    s_logo = img; s_logo_w = img ? w : 0; s_logo_h = img ? h : 0;
+}
+const uint32_t *hud_logo(int *w, int *h){ if (w) *w = s_logo_w; if (h) *h = s_logo_h; return s_logo; }
+float hud_draw_logo(uint32_t *fb, int fw, int fh, int space, float x, float y, float bw, float bh, bool centre){
+    if (!s_logo || bw <= 0 || bh <= 0) return 0;
+    float s = bw / s_logo_w < bh / s_logo_h ? bw / s_logo_w : bh / s_logo_h;
+    if (s > 1) s = 1;
+    float dw = s_logo_w * s, dh = s_logo_h * s;
+    if (centre) x += (bw - dw) / 2;
+    y += (bh - dh) / 2;
+    if (s_hires){ hud_image_alpha(space, x, y, dw, dh, s_logo, s_logo_w, s_logo_h, 1); return dw; }
+    int iw = (int)(dw + 0.5f), ih = (int)(dh + 0.5f);
+    if (iw < 1 || ih < 1) return 0;
+    if (!s_logo_small || s_logo_sw != iw || s_logo_sh != ih){
+        free(s_logo_small);
+        s_logo_small = art_shrink(s_logo, s_logo_w, s_logo_h, iw, ih);
+        s_logo_sw = s_logo_small ? iw : 0; s_logo_sh = s_logo_small ? ih : 0;
+        if (!s_logo_small) return 0;
+    }
+    art_blend(fb, fw, fh, (int)(x + 0.5f), (int)(y + 0.5f), s_logo_small, iw, ih);
+    return dw;
+}
+
 void hud_rect(int space, float x, float y, float w, float h, uint32_t argb){
     if (!s_hires || s_nlayers >= MAX_LAYERS) return;
     HudLayer *l = &s_layers[s_nlayers++];
@@ -335,14 +371,21 @@ void hud_draw(uint32_t *fb, int w, int h){
     const uint32_t WHITE = 0xFFFFFFFF, GREY = 0xFFA0A0B0, YEL = 0xFFFFE040, CYAN = 0xFF60D0FF;
     const HudPage *pg = &s_pages[s_page];
     char info[8][41]; int ninfo = (s_page == s_main && s_info) ? s_info(info, 8) : 0;
+    const int LOGO_H = 18;                               /* header with a logo: 18 px picture */
+    int extra = s_logo ? LOGO_H + 4 - 14 : 0;
     int rows = 2 + (s_npages > 1 ? 1 : 0) + (pg->nopts > 0 ? pg->nopts : 1) + (ninfo ? ninfo + 1 : 0) + 2;
-    int x0 = 8, x1 = w - 8, y0 = 8, y1 = y0 + rows * 10 + 6;
+    int x0 = 8, x1 = w - 8, y0 = 8, y1 = y0 + rows * 10 + 6 + extra;
     if (pg->draw || y1 > h - 4) y1 = h - 4;            /* drawn pages use the full height */
     fill(fb, w, h, x0, y0, x1, y1, 0xFF101830, true);
     fill(fb, w, h, x0, y0, x1, y0 + 1, CYAN, false); fill(fb, w, h, x0, y1 - 1, x1, y1, CYAN, false);
     fill(fb, w, h, x0, y0, x0 + 1, y1, CYAN, false); fill(fb, w, h, x1 - 1, y0, x1, y1, CYAN, false);
     int y = y0 + 5;
-    hud_text(fb, w, h, x0 + 6, y, s_title, CYAN); y += 14;
+    if (s_logo){                                         /* logo; without tabs also the title's part after " - " */
+        float lw = hud_draw_logo(fb, w, h, HUD_SPACE_GAME, (float)(x0 + 5), (float)(y0 + 3), (float)(x1 - x0) * 0.5f, (float)LOGO_H, false);
+        const char *dash = strstr(s_title, " - ");
+        if (dash && s_npages == 1) hud_text(fb, w, h, x0 + 5 + (int)(lw + 0.5f) + 8, y0 + 3 + (LOGO_H - 7) / 2, dash + 3, CYAN);
+        y = y0 + 3 + LOGO_H + 5;
+    } else { hud_text(fb, w, h, x0 + 6, y, s_title, CYAN); y += 14; }
     if (s_npages > 1){                                   /* tab row */
         bool on_tabs = pg->draw ? !pg->own_lr : pg->sel < 0;
         if (!pg->draw && pg->sel < 0) hud_text(fb, w, h, x0 + 4, y, ">", YEL);

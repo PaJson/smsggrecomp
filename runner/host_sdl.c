@@ -284,7 +284,7 @@ typedef struct {
     uint32_t *dbuf; size_t dcap;
     unsigned used;
 } LayerTex;
-#define N_LAYER_TEX 4
+#define N_LAYER_TEX 12                 /* portraits (4) + maps + logo: all fit, no re-upload per frame */
 static LayerTex g_lt[N_LAYER_TEX];
 static unsigned g_lt_clock;
 
@@ -337,15 +337,22 @@ static void layer_shrink(const HudLayer *l, uint32_t *out, int dw, int dh){
         for (int x = 0; x < dw; x++){
             int x0 = xs[x], x1 = xs[x + 1]; if (x1 <= x0) x1 = x0 + 1;
             if (x1 > l->sw) x1 = l->sw;
-            unsigned r = 0, g = 0, b = 0, n = 0;
+            unsigned r = 0, g = 0, b = 0, n = 0, a = 0;
             for (int sy = y0; sy < y1 && sy < l->sh; sy++){
                 int yy = l->sy + sy;
                 if (l->wrap) yy = (yy % l->ih + l->ih) % l->ih; else if (yy < 0 || yy >= l->ih) continue;
                 const uint32_t *row = l->img + (size_t)yy * l->iw;
                 for (int sx = x0; sx < x1; sx++){
                     int xx = col[sx]; if (xx < 0) continue;
-                    uint32_t c = row[xx]; r += c >> 16 & 255; g += c >> 8 & 255; b += c & 255; n++;
+                    uint32_t c = row[xx];
+                    if (l->alpha){ unsigned ca = c >> 24; r += (c >> 16 & 255) * ca; g += (c >> 8 & 255) * ca; b += (c & 255) * ca; a += ca; n++; }
+                    else { r += c >> 16 & 255; g += c >> 8 & 255; b += c & 255; n++; }
                 }
+            }
+            if (l->alpha){                                /* alpha-weighted colour, average alpha */
+                if (a){ out[y * dw + x] = ((a + n / 2) / n) << 24 | (r / a) << 16 | (g / a) << 8 | (b / a); }
+                else out[y * dw + x] = 0;
+                continue;
             }
             if (n){ r /= n; g /= n; b /= n; }
             out[y * dw + x] = 0xFF000000u | r << 16 | g << 8 | b;
@@ -373,6 +380,7 @@ static void layer_image(const HudLayer *l, const SDL_FRect *d){
             SDL_UpdateTexture(t->down, NULL, t->dbuf, dw * 4);
             t->dok = true; t->dgen = l->gen; t->dsx = l->sx; t->dsy = l->sy; t->dsw = l->sw; t->dsh = l->sh;
         }
+        if (l->alpha) SDL_SetTextureBlendMode(t->down, SDL_BLENDMODE_BLEND);
         SDL_RenderCopyF(g_ren, t->down, NULL, d);
         return;
     }
@@ -385,6 +393,7 @@ static void layer_image(const HudLayer *l, const SDL_FRect *d){
     int k = (int)SDL_ceilf(rw / l->sw - 0.01f), ky = (int)SDL_ceilf(rh / l->sh - 0.01f);
     if (ky > k) k = ky;
     while (k > 1 && ((long)l->sw * k > 4096 || (long)l->sh * k > 4096)) k--;
+    if (l->alpha) SDL_SetTextureBlendMode(t->src, SDL_BLENDMODE_BLEND);
     if (k <= 1 || !g_target_ok){
         SDL_SetTextureScaleMode(t->src, SDL_ScaleModeLinear);
         copy_wrapped(t->src, l->iw, l->ih, l->sx, l->sy, l->sw, l->sh, l->wrap, d);
@@ -401,8 +410,13 @@ static void layer_image(const HudLayer *l, const SDL_FRect *d){
     SDL_SetRenderTarget(g_ren, t->tgt);
     SDL_SetTextureScaleMode(t->src, SDL_ScaleModeNearest);
     SDL_FRect full = { 0, 0, (float)tw, (float)th };
+    if (l->alpha){                                     /* keep the alpha: clear, copy unblended */
+        SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 0); SDL_RenderClear(g_ren);
+        SDL_SetTextureBlendMode(t->src, SDL_BLENDMODE_NONE);
+    }
     copy_wrapped(t->src, l->iw, l->ih, l->sx, l->sy, l->sw, l->sh, l->wrap, &full);
     SDL_SetRenderTarget(g_ren, NULL);
+    if (l->alpha){ SDL_SetTextureBlendMode(t->src, SDL_BLENDMODE_BLEND); SDL_SetTextureBlendMode(t->tgt, SDL_BLENDMODE_BLEND); }
     SDL_RenderCopyF(g_ren, t->tgt, NULL, d);
 }
 /* draw the queued layers of one space: images first, then rectangles */

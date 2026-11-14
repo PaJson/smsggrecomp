@@ -123,6 +123,8 @@ void hud_set_hires(bool on);                          /* host: hi-res layers are
 void hud_image(int space, float x, float y, float w, float h, const uint32_t *img, int iw, int ih,
                int sx, int sy, int sw, int sh, bool wrap, uint32_t gen);
 void hud_rect(int space, float x, float y, float w, float h, uint32_t argb);
+/* image with transparency (straight alpha, e.g. a logo), whole image into (x, y, w, h) */
+void hud_image_alpha(int space, float x, float y, float w, float h, const uint32_t *img, int iw, int ih, uint32_t gen);
 /* marker: a filled square centred on (cx, cy) with a rim around it; r = half the square's size,
  * rim = rim width (both in `space` units). The host snaps the centre and both sizes to whole window
  * pixels (square at least 4 px, rim at least 1 px), so the rim is equally thick on all four sides. */
@@ -132,8 +134,18 @@ typedef struct {
     const uint32_t *img; int iw, ih, sx, sy, sw, sh; bool wrap; uint32_t gen;   /* img NULL = rect */
     uint32_t argb;
     bool marker; uint32_t rim_argb;                   /* hud_marker: x, y = centre, w = r, h = rim */
+    bool alpha;                                       /* img has transparency (hud_image_alpha) */
 } HudLayer;
 const HudLayer *hud_layers(int *n);                   /* host: the queued layers, in order */
 void hud_layers_clear(void);
+
+/* Game logo: the user's "Images/<title> (logo).png" (see art.h), outlined; the HUD header shows
+ * it in place of the game name. hud_set_logo takes ownership (malloc'ed ARGB, straight alpha). */
+void hud_set_logo(uint32_t *img, int w, int h);
+const uint32_t *hud_logo(int *w, int *h);             /* NULL = none */
+/* Draw the logo fitted into (x, y, bw, bh) of `space` (never enlarged beyond its own size, vertically
+ * centred, horizontally centred with `centre`, else left-aligned): a hi-res layer when available,
+ * else blended into fb (the frame or panel buffer, fw x fh). Returns the drawn width (0 = no logo). */
+float hud_draw_logo(uint32_t *fb, int fw, int fh, int space, float x, float y, float bw, float bh, bool centre);
 
 #endif

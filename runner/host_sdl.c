@@ -108,6 +108,7 @@ bool host_init(int fb_w, int fb_h,
     if (!g_tex){ fprintf(stderr, "[host] CreateTexture: %s\n", SDL_GetError()); return false; }
     g_target_ok = SDL_RenderTargetSupported(g_ren);
     hud_set_hires(true);
+    hud_set_start_free(!glue_is_gg());                 /* SMS: no Pause button emulated -> Start is free */
     return true;
 }
 
@@ -522,15 +523,20 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
         else if (e.type == SDL_CONTROLLERDEVICEREMOVED){     /* pad timed out / unplugged: release all */
             g_pad_btn = 0; g_pad_axis = 0; g_pad_turbo = g_pad_slow = false; g_extra_pad = 0; nav_clear();
         }
-        /* ---- settings HUD (hud.c): F1 / pad Back toggles; while open it owns the keys ---- */
+        /* ---- settings HUD (hud.c): F1 / pad Start (SMS + panel, hud_start_opens) or Back toggles;
+           while open it owns the keys. Pad Back / F2 = side panel on / off (hud_toggle_panel). ---- */
         else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F1){ if (!e.key.repeat) hud_toggle(); }
+        else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F2){ if (!e.key.repeat) hud_toggle_panel(); }
         /* F11 or Alt+Enter: fullscreen (desktop resolution, letterboxed) <-> window */
         else if (e.type == SDL_KEYDOWN && !e.key.repeat && (e.key.keysym.sym == SDLK_F11
                  || (e.key.keysym.sym == SDLK_RETURN && (e.key.keysym.mod & KMOD_ALT)))){
             bool fs = (SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
             SDL_SetWindowFullscreen(g_win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
         }
-        else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK) hud_toggle();
+        else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK){
+            if (hud_start_opens()) hud_toggle_panel(); else hud_toggle();
+        }
+        else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_START && hud_start_opens()) hud_toggle();
         else if (hud_is_open() && e.type == SDL_KEYDOWN){
             if (e.key.repeat) continue;                 /* own repeat timer (nav_tick) */
             switch (e.key.keysym.sym){

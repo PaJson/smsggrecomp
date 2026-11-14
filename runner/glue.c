@@ -1384,6 +1384,8 @@ bool glue_load_rom(const char *path){
     return true;
 }
 
+bool glue_is_gg(void){ return g_is_gg; }
+
 void glue_init(bool is_gg, uint64_t frame_limit){
     memset(&g_z80, 0, sizeof(g_z80));
     memset(g_ram, 0, sizeof(g_ram));

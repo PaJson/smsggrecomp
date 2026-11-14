@@ -144,6 +144,16 @@ static bool         s_panel_on;
 void hud_set_panel(HudPanelDraw draw){ s_panel_draw = draw; }
 void hud_set_panel_enabled(bool on){ s_panel_on = on; }
 bool hud_panel_active(void){ return s_panel_draw && s_panel_on; }
+static void (*s_panel_cb)(bool);
+static bool s_start_free;
+void hud_set_on_panel_toggle(void (*cb)(bool on)){ s_panel_cb = cb; }
+void hud_toggle_panel(void){
+    if (!s_panel_draw) return;
+    s_panel_on = !s_panel_on;
+    if (s_panel_cb) s_panel_cb(s_panel_on);
+}
+void hud_set_start_free(bool free){ s_start_free = free; }
+bool hud_start_opens(void){ return s_start_free && s_panel_draw; }
 void hud_panel_render(uint32_t *buf, int w, int h){
     if (s_panel_draw) s_panel_draw(buf, w, h);
     else for (int i = 0; i < w * h; i++) buf[i] = 0xFF000000u;
@@ -368,8 +378,10 @@ void hud_draw(uint32_t *fb, int w, int h){
     }
     if (pg->draw){
         pg->draw(fb, w, h, x0 + 4, y, x1 - 4, y1 - 14);
-        hud_text(fb, w, h, x0 + 6, y1 - 12, pg->own_lr ? "LB/RB (Q/E) PAGE   F1/BACK CLOSE"
-                                                       : "LEFT/RIGHT PAGE   F1/BACK CLOSE", GREY);
+        const char *cl = hud_start_opens() ? "F1/START CLOSE" : "F1/BACK CLOSE";
+        char hint[48];
+        snprintf(hint, sizeof hint, "%s   %s", pg->own_lr ? "LB/RB (Q/E) PAGE" : "LEFT/RIGHT PAGE", cl);
+        hud_text(fb, w, h, x0 + 6, y1 - 12, hint, GREY);
         return;
     }
     if (pg->nopts <= 0){ hud_text(fb, w, h, x0 + 6, y, "NO OPTIONS FOR THIS GAME", GREY); y += 10; }

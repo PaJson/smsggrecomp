@@ -23,6 +23,7 @@ const char    *glue_save_path(void);
 
 /* Initialise bus/VDP/CPU for a fresh run. frame_limit==0 means run forever. */
 void     glue_init(bool is_gg, uint64_t frame_limit);
+bool     glue_is_gg(void);
 
 /* Enter the game at the reset vector. Returns when the frame limit is hit
  * (the reset routine itself never returns; a longjmp unwinds out of it). */

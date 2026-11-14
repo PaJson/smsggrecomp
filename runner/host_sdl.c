@@ -454,6 +454,8 @@ static void draw_layers(int space, bool panel){
                 /* whole window pixels: each edge rounded on its own (even borders for snapped shapes) */
                 float x0 = SDL_roundf(d.x * scx), x1 = SDL_roundf((d.x + d.w) * scx);
                 float y0 = SDL_roundf(d.y * scy), y1 = SDL_roundf((d.y + d.h) * scy);
+                if (d.w > 0 && x1 <= x0) x1 = x0 + 1;   /* thin lines never vanish (a 0.75-px line rounded to 0 or 1) */
+                if (d.h > 0 && y1 <= y0) y1 = y0 + 1;
                 d.x = x0 / scx; d.w = (x1 - x0) / scx; d.y = y0 / scy; d.h = (y1 - y0) / scy;
                 uint8_t a = (uint8_t)(l->argb >> 24);
                 SDL_SetRenderDrawBlendMode(g_ren, a == 255 ? SDL_BLENDMODE_NONE : SDL_BLENDMODE_BLEND);

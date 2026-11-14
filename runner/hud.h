@@ -66,4 +66,30 @@ void hud_set_panel_enabled(bool on);
 bool hud_panel_active(void);                          /* registered and enabled */
 void hud_panel_render(uint32_t *buf, int w, int h);   /* host: fill the panel image */
 
+/* High-resolution layers: images and rectangles the SDL host draws at the window's REAL pixel
+ * resolution on top of the scaled game picture (HUD_SPACE_GAME, framebuffer coordinates as passed
+ * to hud_draw) or the side panel (HUD_SPACE_PANEL, panel coordinates). Use them for detailed
+ * pictures (maps) that would lose detail in the 256-px frame / panel. Register them every frame
+ * from a HUD page or panel draw; the host draws them on the next present, then forgets them.
+ * Only when hud_hires() is true (SDL window); otherwise draw into the frame / panel as usual.
+ *   image: ARGB pixels (iw x ih, must stay valid until the present), the source rectangle
+ *          (sx, sy, sw, sh) is shown in the destination rectangle (x, y, w, h); with `wrap` the
+ *          source repeats (sx/sy may be anywhere). `gen` must change whenever the pixels change
+ *          (the host keeps a texture per image and only re-uploads then). Scaling: integer nearest
+ *          + linear when enlarging (sharp pixels), area average when shrinking.
+ *   rect:  filled rectangle, argb alpha < 255 blends. Drawn after all images of the same space. */
+enum { HUD_SPACE_GAME, HUD_SPACE_PANEL };
+bool hud_hires(void);
+void hud_set_hires(bool on);                          /* host: hi-res layers are drawn */
+void hud_image(int space, float x, float y, float w, float h, const uint32_t *img, int iw, int ih,
+               int sx, int sy, int sw, int sh, bool wrap, uint32_t gen);
+void hud_rect(int space, float x, float y, float w, float h, uint32_t argb);
+typedef struct {
+    int space; float x, y, w, h;
+    const uint32_t *img; int iw, ih, sx, sy, sw, sh; bool wrap; uint32_t gen;   /* img NULL = rect */
+    uint32_t argb;
+} HudLayer;
+const HudLayer *hud_layers(int *n);                   /* host: the queued layers, in order */
+void hud_layers_clear(void);
+
 #endif

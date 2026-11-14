@@ -28,6 +28,7 @@ static SDL_Renderer *g_ren;
 static SDL_Texture  *g_tex;
 static SDL_Rect      g_src;     /* crop region of the framebuffer */
 static int g_internal_scale;
+static bool g_target_ok;        /* render targets supported (hi-res layers: sharp enlarging) */
 static bool g_hidden,g_gpu;
 bool host_uses_gpu(void){return g_gpu;}
 static double g_work_ms[8192];
@@ -105,6 +106,8 @@ bool host_init(int fb_w, int fb_h,
     g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888,
                               SDL_TEXTUREACCESS_STREAMING, fb_w, fb_h);
     if (!g_tex){ fprintf(stderr, "[host] CreateTexture: %s\n", SDL_GetError()); return false; }
+    g_target_ok = SDL_RenderTargetSupported(g_ren);
+    hud_set_hires(true);
     return true;
 }
 
@@ -257,12 +260,172 @@ static void panel_layout(bool on){
     }
     g_panel_on = on;
 }
+/* ---- high-resolution layers (hud.h): images / rectangles drawn at the window's real resolution ----
+ * Per source image a cached texture (re-uploaded only when its `gen` changes). Enlarging = "sharp
+ * bilinear": nearest to an integer multiple in a target texture, then linear to the real size.
+ * Shrinking = area average in software to the real size (GPU linear would alias), cached by
+ * (gen, source rect, size). */
+typedef struct {
+    const uint32_t *img; int iw, ih; uint32_t gen; bool loaded;
+    SDL_Texture *src;
+    SDL_Texture *tgt; int tw, th;
+    SDL_Texture *down; int dw, dh;
+    uint32_t dgen; int dsx, dsy, dsw, dsh; bool dok;
+    uint32_t *dbuf; size_t dcap;
+    unsigned used;
+} LayerTex;
+#define N_LAYER_TEX 4
+static LayerTex g_lt[N_LAYER_TEX];
+static unsigned g_lt_clock;
+
+static void lt_free(LayerTex *t){
+    if (t->src) SDL_DestroyTexture(t->src);
+    if (t->tgt) SDL_DestroyTexture(t->tgt);
+    if (t->down) SDL_DestroyTexture(t->down);
+    free(t->dbuf);
+    memset(t, 0, sizeof *t);
+}
+static LayerTex *lt_get(const HudLayer *l){
+    LayerTex *best = &g_lt[0];
+    for (int i = 0; i < N_LAYER_TEX; i++){
+        LayerTex *t = &g_lt[i];
+        if (t->img == l->img && t->iw == l->iw && t->ih == l->ih){ t->used = ++g_lt_clock; return t; }
+        if (t->used < best->used) best = t;
+    }
+    lt_free(best);
+    best->img = l->img; best->iw = l->iw; best->ih = l->ih; best->used = ++g_lt_clock;
+    return best;
+}
+/* copy the source rect (repeating with wrap) of texture t into d */
+static void copy_wrapped(SDL_Texture *t, int iw, int ih, int sx, int sy, int sw, int sh, bool wrap, const SDL_FRect *d){
+    if (!wrap){ SDL_Rect s = { sx, sy, sw, sh }; SDL_RenderCopyF(g_ren, t, &s, d); return; }
+    float kx = d->w / (float)sw, ky = d->h / (float)sh;
+    for (int oy = 0; oy < sh; ){
+        int y = ((sy + oy) % ih + ih) % ih, hh = ih - y; if (hh > sh - oy) hh = sh - oy;
+        for (int ox = 0; ox < sw; ){
+            int x = ((sx + ox) % iw + iw) % iw, ww = iw - x; if (ww > sw - ox) ww = sw - ox;
+            SDL_Rect s = { x, y, ww, hh };
+            SDL_FRect p = { d->x + ox * kx, d->y + oy * ky, ww * kx, hh * ky };
+            SDL_RenderCopyF(g_ren, t, &s, &p);
+            ox += ww;
+        }
+        oy += hh;
+    }
+}
+/* area-average the layer's source rect into dw x dh pixels */
+static void layer_shrink(const HudLayer *l, uint32_t *out, int dw, int dh){
+    static int *xs, *col; static int xcap, ccap;      /* output column bounds, source column -> image column */
+    if (xcap < dw + 1){ free(xs); xs = (int*)malloc(sizeof(int) * (size_t)(dw + 1)); xcap = xs ? dw + 1 : 0; if (!xs) return; }
+    if (ccap < l->sw){ free(col); col = (int*)malloc(sizeof(int) * (size_t)l->sw); ccap = col ? l->sw : 0; if (!col) return; }
+    for (int x = 0; x <= dw; x++) xs[x] = (int)((long long)x * l->sw / dw);
+    for (int sx = 0; sx < l->sw; sx++){
+        int xx = l->sx + sx;
+        col[sx] = l->wrap ? (xx % l->iw + l->iw) % l->iw : (xx >= 0 && xx < l->iw ? xx : -1);
+    }
+    for (int y = 0; y < dh; y++){
+        int y0 = (int)((long long)y * l->sh / dh), y1 = (int)((long long)(y + 1) * l->sh / dh); if (y1 <= y0) y1 = y0 + 1;
+        for (int x = 0; x < dw; x++){
+            int x0 = xs[x], x1 = xs[x + 1]; if (x1 <= x0) x1 = x0 + 1;
+            if (x1 > l->sw) x1 = l->sw;
+            unsigned r = 0, g = 0, b = 0, n = 0;
+            for (int sy = y0; sy < y1 && sy < l->sh; sy++){
+                int yy = l->sy + sy;
+                if (l->wrap) yy = (yy % l->ih + l->ih) % l->ih; else if (yy < 0 || yy >= l->ih) continue;
+                const uint32_t *row = l->img + (size_t)yy * l->iw;
+                for (int sx = x0; sx < x1; sx++){
+                    int xx = col[sx]; if (xx < 0) continue;
+                    uint32_t c = row[xx]; r += c >> 16 & 255; g += c >> 8 & 255; b += c & 255; n++;
+                }
+            }
+            if (n){ r /= n; g /= n; b /= n; }
+            out[y * dw + x] = 0xFF000000u | r << 16 | g << 8 | b;
+        }
+    }
+}
+static void layer_image(const HudLayer *l, const SDL_FRect *d){
+    float scx = 1, scy = 1; SDL_RenderGetScale(g_ren, &scx, &scy);
+    float rw = d->w * scx, rh = d->h * scy;
+    if (rw < 1 || rh < 1) return;
+    LayerTex *t = lt_get(l);
+    if (rw < l->sw * 0.999f || rh < l->sh * 0.999f){                 /* shrink: software */
+        int dw = (int)(rw + 0.5f), dh = (int)(rh + 0.5f);
+        if (!t->down || t->dw != dw || t->dh != dh){
+            if (t->down) SDL_DestroyTexture(t->down);
+            t->down = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, dw, dh);
+            t->dw = dw; t->dh = dh; t->dok = false;
+            if (!t->down) return;
+            SDL_SetTextureScaleMode(t->down, SDL_ScaleModeLinear);
+        }
+        if (!t->dok || t->dgen != l->gen || t->dsx != l->sx || t->dsy != l->sy || t->dsw != l->sw || t->dsh != l->sh){
+            size_t need = (size_t)dw * (size_t)dh;
+            if (t->dcap < need){ free(t->dbuf); t->dbuf = (uint32_t*)malloc(need * 4); t->dcap = t->dbuf ? need : 0; if (!t->dbuf) return; }
+            layer_shrink(l, t->dbuf, dw, dh);
+            SDL_UpdateTexture(t->down, NULL, t->dbuf, dw * 4);
+            t->dok = true; t->dgen = l->gen; t->dsx = l->sx; t->dsy = l->sy; t->dsw = l->sw; t->dsh = l->sh;
+        }
+        SDL_RenderCopyF(g_ren, t->down, NULL, d);
+        return;
+    }
+    if (!t->src){
+        t->src = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, l->iw, l->ih);
+        t->loaded = false;
+        if (!t->src) return;
+    }
+    if (!t->loaded || t->gen != l->gen){ SDL_UpdateTexture(t->src, NULL, l->img, l->iw * 4); t->gen = l->gen; t->loaded = true; }
+    int k = (int)SDL_ceilf(rw / l->sw - 0.01f), ky = (int)SDL_ceilf(rh / l->sh - 0.01f);
+    if (ky > k) k = ky;
+    while (k > 1 && ((long)l->sw * k > 4096 || (long)l->sh * k > 4096)) k--;
+    if (k <= 1 || !g_target_ok){
+        SDL_SetTextureScaleMode(t->src, SDL_ScaleModeLinear);
+        copy_wrapped(t->src, l->iw, l->ih, l->sx, l->sy, l->sw, l->sh, l->wrap, d);
+        return;
+    }
+    int tw = l->sw * k, th = l->sh * k;
+    if (!t->tgt || t->tw != tw || t->th != th){
+        if (t->tgt) SDL_DestroyTexture(t->tgt);
+        t->tgt = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, tw, th);
+        t->tw = tw; t->th = th;
+        if (!t->tgt) return;
+        SDL_SetTextureScaleMode(t->tgt, SDL_ScaleModeLinear);
+    }
+    SDL_SetRenderTarget(g_ren, t->tgt);
+    SDL_SetTextureScaleMode(t->src, SDL_ScaleModeNearest);
+    SDL_FRect full = { 0, 0, (float)tw, (float)th };
+    copy_wrapped(t->src, l->iw, l->ih, l->sx, l->sy, l->sw, l->sh, l->wrap, &full);
+    SDL_SetRenderTarget(g_ren, NULL);
+    SDL_RenderCopyF(g_ren, t->tgt, NULL, d);
+}
+/* draw the queued layers of one space: images first, then rectangles */
+static void draw_layers(int space, bool panel){
+    int n; const HudLayer *ls = hud_layers(&n);
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < n; i++){
+            const HudLayer *l = &ls[i];
+            if (l->space != space || (pass == 0) != (l->img != NULL)) continue;
+            SDL_FRect d;
+            if (space == HUD_SPACE_GAME){
+                float k = panel ? 3.0f : 1.0f;
+                d.x = (l->x - g_src.x) * k; d.y = (l->y - g_src.y) * k; d.w = l->w * k; d.h = l->h * k;
+            } else { d.x = (float)(g_src.w * 3) + l->x; d.y = l->y; d.w = l->w; d.h = l->h; }
+            if (l->img) layer_image(l, &d);
+            else {
+                uint8_t a = (uint8_t)(l->argb >> 24);
+                SDL_SetRenderDrawBlendMode(g_ren, a == 255 ? SDL_BLENDMODE_NONE : SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(g_ren, (uint8_t)(l->argb >> 16), (uint8_t)(l->argb >> 8), (uint8_t)l->argb, a);
+                SDL_RenderFillRectF(g_ren, &d);
+                SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_NONE);
+            }
+        }
+}
+
 /* test: SMS_WINDOW_SHOT=<file.ppm> [SMS_WINDOW_SHOT_FRAME=n] writes the composed window of the n-th
- * presented frame (default 1) as a PPM (works with --hidden) */
+ * presented frame (default 1) as a PPM (works with --hidden); SMS_WINDOW_SHOT_EXIT=1 quits after it */
+static bool g_shot_quit;
 static void window_shot(void){
     static long n = -1, target = 1; static const char *path;
     if (n < 0){ path = getenv("SMS_WINDOW_SHOT"); const char *f = getenv("SMS_WINDOW_SHOT_FRAME"); if (f) target = atol(f); n = 0; }
     if (!path || ++n != target) return;
+    if (getenv("SMS_WINDOW_SHOT_EXIT")) g_shot_quit = true;
     int w, h; if (SDL_GetRendererOutputSize(g_ren, &w, &h) != 0 || w <= 0 || h <= 0) return;
     uint32_t *px = (uint32_t*)malloc((size_t)w * (size_t)h * 4); if (!px) return;
     if (SDL_RenderReadPixels(g_ren, NULL, SDL_PIXELFORMAT_ARGB8888, px, w * 4) == 0){
@@ -290,20 +453,27 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
         SDL_Rect game = { 0, 0, g_src.w * 3, g_src.h * 3 }, side = { g_src.w * 3, 0, HUD_PANEL_W, HUD_PANEL_H };
         if (side.h != game.h) side.h = game.h;
         SDL_RenderCopy(g_ren, g_tex, &g_src, &game);
+        draw_layers(HUD_SPACE_GAME, true);
         hud_panel_render(g_panel_buf, HUD_PANEL_W, HUD_PANEL_H);
         SDL_UpdateTexture(g_panel_tex, NULL, g_panel_buf, HUD_PANEL_W * (int)sizeof(uint32_t));
         SDL_RenderCopy(g_ren, g_panel_tex, NULL, &side);
-    } else
+        draw_layers(HUD_SPACE_PANEL, true);
+    } else {
         SDL_RenderCopy(g_ren, g_tex, &g_src, NULL);
+        draw_layers(HUD_SPACE_GAME, false);
+    }
+    hud_layers_clear();
     window_shot();
     SDL_RenderPresent(g_ren);
     }
     (void)fb_h;
 
-    bool quit = false;
+    bool quit = g_shot_quit;
     SDL_Event e;
     while (SDL_PollEvent(&e)){
         if (e.type == SDL_QUIT) quit = true;
+        else if (e.type == SDL_RENDER_TARGETS_RESET || e.type == SDL_RENDER_DEVICE_RESET)
+            for (int i = 0; i < N_LAYER_TEX; i++){ g_lt[i].loaded = false; g_lt[i].dok = false; }   /* re-upload */
         else if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_CLOSE){
             /* A game-owned auxiliary window (tagged with window data "aux", e.g. the auto-map)
              * just hides itself; closing the main window quits. */
@@ -386,6 +556,8 @@ void host_shutdown(void){
     g_gpu=false;
     if (g_panel_tex) SDL_DestroyTexture(g_panel_tex);
     g_panel_tex = NULL; g_panel_on = false;
+    for (int i = 0; i < N_LAYER_TEX; i++) lt_free(&g_lt[i]);
+    hud_set_hires(false);
     if (g_tex) SDL_DestroyTexture(g_tex);
     if (g_ren) SDL_DestroyRenderer(g_ren);
     if (g_win) SDL_DestroyWindow(g_win);

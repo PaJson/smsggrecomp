@@ -119,6 +119,30 @@ void hud_panel_render(uint32_t *buf, int w, int h){
     else for (int i = 0; i < w * h; i++) buf[i] = 0xFF000000u;
 }
 
+/* ---- high-resolution layers (drawn by the SDL host) ---- */
+#define MAX_LAYERS 64
+static HudLayer s_layers[MAX_LAYERS];
+static int      s_nlayers;
+static bool     s_hires;
+bool hud_hires(void){ return s_hires; }
+void hud_set_hires(bool on){ s_hires = on; }
+void hud_image(int space, float x, float y, float w, float h, const uint32_t *img, int iw, int ih,
+               int sx, int sy, int sw, int sh, bool wrap, uint32_t gen){
+    if (!s_hires || !img || s_nlayers >= MAX_LAYERS || iw <= 0 || ih <= 0 || sw <= 0 || sh <= 0) return;
+    HudLayer *l = &s_layers[s_nlayers++];
+    memset(l, 0, sizeof *l);
+    l->space = space; l->x = x; l->y = y; l->w = w; l->h = h;
+    l->img = img; l->iw = iw; l->ih = ih; l->sx = sx; l->sy = sy; l->sw = sw; l->sh = sh; l->wrap = wrap; l->gen = gen;
+}
+void hud_rect(int space, float x, float y, float w, float h, uint32_t argb){
+    if (!s_hires || s_nlayers >= MAX_LAYERS) return;
+    HudLayer *l = &s_layers[s_nlayers++];
+    memset(l, 0, sizeof *l);
+    l->space = space; l->x = x; l->y = y; l->w = w; l->h = h; l->argb = argb;
+}
+const HudLayer *hud_layers(int *n){ *n = s_nlayers; return s_layers; }
+void hud_layers_clear(void){ s_nlayers = 0; }
+
 /* ---- state ---- */
 static const char      *s_title = "SETTINGS";
 static const HudOption *s_opts;

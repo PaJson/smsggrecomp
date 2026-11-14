@@ -176,6 +176,7 @@ static int tile_pixel(int tile, int px, int py){
 }
 
 int g_vdp_force_display = 0;   /* debug: render even when display is disabled */
+int g_vdp_sprite_limit = 0;    /* sprites per line shown: 0 = unlimited, 8 = real hardware */
 
 static void render_reference_lines(uint32_t *fb,int first,int last){
     const uint8_t r0 = g_vdp.reg[0], r1 = g_vdp.reg[1];
@@ -241,6 +242,22 @@ static void render_reference_lines(uint32_t *fb,int first,int last){
     memset(spr_top + SMS_SCREEN_W * first, 0, (size_t)SMS_SCREEN_W * (size_t)(last - first));
     int nspr = 0;
     while (nspr < 64 && g_vdp.vram[(sat + nspr) & 0x3FFF] != 0xD0) nspr++;   /* terminator (192-line mode) */
+    /* optional hardware limit: per line only the first N sprites (by table index, counted by Y alone,
+       also when off-screen in X) are shown */
+    static uint8_t line_cnt[SMS_SCREEN_H];
+    static uint64_t spr_line_ok[SMS_SCREEN_H];                    /* bit i = sprite i shown on that line */
+    if (g_vdp_sprite_limit > 0){
+        memset(line_cnt, 0, sizeof line_cnt);
+        memset(spr_line_ok, 0, sizeof spr_line_ok);
+        for (int i = 0; i < nspr; i++){
+            int sy = (g_vdp.vram[(sat + i) & 0x3FFF] + 1) & 0xFF;
+            for (int ry = 0; ry < sh; ry++){
+                int y = sy + ry;
+                if (y >= SMS_SCREEN_H) break;
+                if (line_cnt[y] < g_vdp_sprite_limit){ line_cnt[y]++; spr_line_ok[y] |= 1ull << i; }
+            }
+        }
+    }
     for (int i = nspr - 1; i >= 0; i--){
         int yraw = g_vdp.vram[(sat + i) & 0x3FFF];
         int sy = (yraw + 1) & 0xFF;
@@ -251,6 +268,7 @@ static void render_reference_lines(uint32_t *fb,int first,int last){
         for (int ry = 0; ry < sh; ry++){
             int y = sy + ry;
             if (y < first || y >= last) continue;
+            if (g_vdp_sprite_limit > 0 && !(spr_line_ok[y] >> i & 1)) continue;
             int tile = sbase + st + (ry >> 3);
             int py = ry & 7;
             for (int rx = 0; rx < 8; rx++){
@@ -305,12 +323,13 @@ static void prepare_line(VdpLineJob *j, int y){
     }
     int sat=(g_vdp.reg[5]&0x7e)<<7;
     int sh=(r1&2)?16:8, base=(g_vdp.reg[6]&4)?256:0;
-    unsigned n=0;
+    unsigned n=0; int cnt=0;
     for (int i=0;i<64;i++){
         int raw=g_vdp.vram[(sat+i)&0x3fff];
         if (raw==0xd0) break;
         int sy=(raw+1)&255, ry=y-sy;
         if (ry<0 || ry>=sh) continue;
+        if (g_vdp_sprite_limit>0 && cnt++>=g_vdp_sprite_limit) break;   /* hardware: 9th+ sprite dropped */
         int sx=g_vdp.vram[(sat+128+i*2)&0x3fff]-((r0&8)?8:0);
         if (sx>=256 || sx+8<=0) continue;
         int tile=g_vdp.vram[(sat+129+i*2)&0x3fff];

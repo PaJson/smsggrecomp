@@ -66,6 +66,10 @@ bool    vdp_irq_asserted(void);
  * render from end-of-frame state - no per-scanline raster effects yet. */
 void    vdp_render_frame(uint32_t *fb);
 
+/* Sprites shown per scanline: 0 = unlimited (default), 8 = real hardware (the 9th+ sprite on a line,
+ * by table order, is not drawn). Display only: the status overflow flag is not modelled. */
+extern int g_vdp_sprite_limit;
+
 /* Owned native-density jobs. Inline source rows freeze VRAM at preparation;
  * no pointer refers to mutable guest memory. Texture layout is RGBA32UI. */
 #define VDP_JOB_WIDTH 105

@@ -568,6 +568,16 @@ static void frame_completed(void){
     g_frame++;
     { static int armed=-1; if(armed<0){armed=getenv("SMS_IC_TRACE")?1:0;}
       if(armed) fprintf(stderr,"IC %llu %llu\n",(unsigned long long)g_frame,(unsigned long long)g_frame_ic); g_frame_ic=0; }
+    { /* diagnostic: SMS_SPRITE_SCAN=N prints frames where a scanline has >= N sprites (1 = more than 8) (end-of-frame SAT) */
+      static int scan=-1; if(scan<0){ const char *e=getenv("SMS_SPRITE_SCAN"); scan=e?atoi(e):0; if(scan==1) scan=9; }
+      if(scan){
+        int sat=(g_vdp.reg[5]&0x7E)<<7, sh=(g_vdp.reg[1]&2)?16:8, maxc=0, over=0;
+        uint8_t cnt[256]={0};
+        for(int i=0;i<64;i++){ int raw=g_vdp.vram[(sat+i)&0x3FFF]; if(raw==0xD0) break;
+          for(int r=0;r<sh;r++){ int y=((raw+1)&0xFF)+r; if(y<192) cnt[y]++; } }
+        for(int y=0;y<192;y++){ if(cnt[y]>maxc) maxc=cnt[y]; if(cnt[y]>=scan) over++; }
+        if(over) fprintf(stderr,"SPRSCAN %llu max %d lines %d\n",(unsigned long long)g_frame,maxc,over);
+      } }
 #ifdef SMSGG_HAVE_GAME_LAYOUT
     if (g_game_spec.on_frame_post) g_game_spec.on_frame_post(g_frame);   /* per-game hook: state of the frame just finished */
 #endif

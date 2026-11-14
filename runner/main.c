@@ -249,6 +249,7 @@ int main(int argc, char **argv){
         else if (strcmp(argv[i],"--vdp-trace")==0 && i+1<argc) vdp_trace = argv[++i];
         else if (strcmp(argv[i],"--psg-log")==0 && i+1<argc) psg_log = argv[++i];
         else if (strcmp(argv[i],"--force-display")==0){ extern int g_vdp_force_display; g_vdp_force_display=1; }
+        else if (strcmp(argv[i],"--sprite-limit")==0 && i+1<argc){ extern int g_vdp_sprite_limit; g_vdp_sprite_limit=(int)strtol(argv[++i],NULL,10); }
         else if (strcmp(argv[i],"--interp")==0) interp = true;
         else if (strcmp(argv[i],"--audio-wav")==0 && i+1<argc) audio_wav = argv[++i];
         else if (strcmp(argv[i],"--mute")==0) mute = true;

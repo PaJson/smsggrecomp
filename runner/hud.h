@@ -92,10 +92,15 @@ void hud_set_hires(bool on);                          /* host: hi-res layers are
 void hud_image(int space, float x, float y, float w, float h, const uint32_t *img, int iw, int ih,
                int sx, int sy, int sw, int sh, bool wrap, uint32_t gen);
 void hud_rect(int space, float x, float y, float w, float h, uint32_t argb);
+/* marker: a filled square centred on (cx, cy) with a rim around it; r = half the square's size,
+ * rim = rim width (both in `space` units). The host snaps the centre and both sizes to whole window
+ * pixels (square at least 4 px, rim at least 1 px), so the rim is equally thick on all four sides. */
+void hud_marker(int space, float cx, float cy, float r, float rim, uint32_t fill_argb, uint32_t rim_argb);
 typedef struct {
     int space; float x, y, w, h;
     const uint32_t *img; int iw, ih, sx, sy, sw, sh; bool wrap; uint32_t gen;   /* img NULL = rect */
     uint32_t argb;
+    bool marker; uint32_t rim_argb;                   /* hud_marker: x, y = centre, w = r, h = rim */
 } HudLayer;
 const HudLayer *hud_layers(int *n);                   /* host: the queued layers, in order */
 void hud_layers_clear(void);

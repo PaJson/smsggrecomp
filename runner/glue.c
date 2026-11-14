@@ -546,9 +546,22 @@ void sms_io_out(uint8_t p, uint8_t v){
     }
     if (p < 0x80){                                       /* PSG data ($40-$7F, canonically $7F) */
         if (g_psg_log) fprintf(g_psg_log,"%llu,%u\n",(unsigned long long)g_z80.cyc,v);
+        {   /* diagnostic: SMS_PSGLOG_IX=<file> logs every PSG write as "frame pc ix iy value" (which
+               sound-driver channel struct wrote it; recompiled build only) */
+            static FILE *pl; static int pl_init;
+            if (!pl_init){ pl_init=1; const char *e=getenv("SMS_PSGLOG_IX"); if (e) pl=fopen(e,"w"); }
+            if (pl) fprintf(pl,"%llu %04X %04X %04X %02X\n",(unsigned long long)g_frame,g_dbg_pc,g_z80.ix,g_z80.iy,v);
+        }
         psg_write(v); return;
     }
-    if ((p & 0xFC) == 0xF0){ fm_port_write(p, v); return; }      /* YM2413 FM unit: $F0 addr, $F1 data, $F2 control */
+    if ((p & 0xFC) == 0xF0){                                      /* YM2413 FM unit: $F0 addr, $F1 data, $F2 control */
+        {   /* diagnostic: SMS_PSGLOG_IX also logs FM writes as "frame F<port> ix iy value" */
+            static FILE *pl; static int pl_init;
+            if (!pl_init){ pl_init=1; const char *e=getenv("SMS_PSGLOG_IX"); if (e){ char n[1024]; snprintf(n,sizeof n,"%s.fm",e); pl=fopen(n,"w"); } }
+            if (pl) fprintf(pl,"%llu F%u %04X %04X %02X\n",(unsigned long long)g_frame,p&3,g_z80.ix,g_z80.iy,v);
+        }
+        fm_port_write(p, v); return;
+    }
     if (p < 0xC0){
         static FILE *vl; static int vl_init;
         if (!vl_init){ vl_init=1; const char *e=getenv("SMS_VDPLOG"); if (e) vl=fopen(e,"w"); }   /* diagnostic: port-write stream */

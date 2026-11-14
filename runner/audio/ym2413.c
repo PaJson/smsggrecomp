@@ -17,12 +17,34 @@ static uint8_t  s_addr_latch;
 static uint8_t  s_ctrl;                         /* $F2 */
 static uint32_t s_phase;                        /* Z80 clocks since the newest OPLL sample */
 static int32_t  s_prev, s_cur;
+static unsigned s_gain[14] = { 256, 256, 256, 256, 256, 256, 256, 256, 256, 256, 256, 256, 256, 256 };
+static int      s_gain_set;                     /* any gain != 256: mix per channel (OPLL_calcStereo) */
+
+static void apply_gains(void)
+{
+    s_gain_set = 0;
+    for (unsigned i = 0; i < 14; i++) {
+        float g[2]; g[0] = g[1] = s_gain[i] / 256.0f;
+        if (s_opll) OPLL_setPanFine(s_opll, i, g);
+        if (s_gain[i] != 256) s_gain_set = 1;
+    }
+}
+
+void fm_set_channel_gain(unsigned ch, unsigned gain)
+{
+    if (ch >= 14) return;
+    if (gain > 256) gain = 256;
+    if (s_gain[ch] == gain) return;
+    s_gain[ch] = gain;
+    apply_gains();
+}
 
 void fm_reset(void)
 {
     if (!s_opll) s_opll = OPLL_new(OPLL_CLOCK, OPLL_CLOCK / OPLL_DIVIDER);
     if (!s_opll) return;
     OPLL_reset(s_opll);
+    apply_gains();                              /* OPLL_reset clears the per-channel pans */
     s_addr_latch = 0; s_ctrl = 0; s_phase = 0; s_prev = s_cur = 0;
     psg_set_aux_mixer(fm_mix);
 }
@@ -63,7 +85,8 @@ void fm_mix(int16_t *frames, size_t n)
             while (s_phase >= OPLL_DIVIDER) {
                 s_phase -= OPLL_DIVIDER;
                 s_prev = s_cur;
-                s_cur = OPLL_calc(s_opll);
+                if (s_gain_set) { int32_t o[2]; OPLL_calcStereo(s_opll, o); s_cur = o[0]; }
+                else s_cur = OPLL_calc(s_opll);
             }
             int32_t s = s_prev + (int32_t)(((int64_t)(s_cur - s_prev) * (int32_t)s_phase) / OPLL_DIVIDER);
             s = s * FM_GAIN_NUM / FM_GAIN_DEN;

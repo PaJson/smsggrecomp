@@ -17,6 +17,9 @@ void   psg_init(void);
 
 /* Optional aux mixer (e.g. the YM2413 FM unit): called after each block of PSG frames is
  * synthesised, with the block's interleaved stereo S16 frames, so it can add/mute in place. */
+/* Per-channel output gain, 0..256 (256 = unchanged; ch 0..2 tone, 3 noise). Host-side mixing
+ * (volume options), not chip state: never saved, and the emulated registers are untouched. */
+void   psg_set_channel_gain(unsigned ch, unsigned gain);
 void   psg_set_aux_mixer(void (*mix)(int16_t *frames, size_t n));
 
 /* Advance the PSG by `cycles_z80` Z80 T-states, synthesising whole stereo

@@ -398,17 +398,39 @@ static void layer_image(const HudLayer *l, const SDL_FRect *d){
 /* draw the queued layers of one space: images first, then rectangles */
 static void draw_layers(int space, bool panel){
     int n; const HudLayer *ls = hud_layers(&n);
+    float scx = 1, scy = 1; SDL_RenderGetScale(g_ren, &scx, &scy);
+    if (scx <= 0) scx = 1;
+    if (scy <= 0) scy = 1;
+    float k = space == HUD_SPACE_GAME && panel ? 3.0f : 1.0f;
     for (int pass = 0; pass < 2; pass++)
         for (int i = 0; i < n; i++){
             const HudLayer *l = &ls[i];
             if (l->space != space || (pass == 0) != (l->img != NULL)) continue;
             SDL_FRect d;
             if (space == HUD_SPACE_GAME){
-                float k = panel ? 3.0f : 1.0f;
                 d.x = (l->x - g_src.x) * k; d.y = (l->y - g_src.y) * k; d.w = l->w * k; d.h = l->h * k;
             } else { d.x = (float)(g_src.w * 3) + l->x; d.y = l->y; d.w = l->w; d.h = l->h; }
             if (l->img) layer_image(l, &d);
+            else if (l->marker){
+                /* one centre in whole window pixels, sizes in whole pixels: both squares share it */
+                float s = (space == HUD_SPACE_GAME ? k : 1.0f) * scx;
+                int R = (int)SDL_roundf(l->w * s), E = (int)SDL_roundf(l->h * s);
+                if (R < 2) R = 2;
+                if (E < 1) E = 1;
+                float cx = SDL_floorf(d.x * scx + 0.5f), cy = SDL_floorf(d.y * scy + 0.5f);
+                SDL_FRect o = { (cx - R - E) / scx, (cy - R - E) / scy, (float)(2 * (R + E)) / scx, (float)(2 * (R + E)) / scy };
+                SDL_FRect in = { (cx - R) / scx, (cy - R) / scy, (float)(2 * R) / scx, (float)(2 * R) / scy };
+                SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_NONE);
+                SDL_SetRenderDrawColor(g_ren, (uint8_t)(l->rim_argb >> 16), (uint8_t)(l->rim_argb >> 8), (uint8_t)l->rim_argb, 255);
+                SDL_RenderFillRectF(g_ren, &o);
+                SDL_SetRenderDrawColor(g_ren, (uint8_t)(l->argb >> 16), (uint8_t)(l->argb >> 8), (uint8_t)l->argb, 255);
+                SDL_RenderFillRectF(g_ren, &in);
+            }
             else {
+                /* whole window pixels: each edge rounded on its own (even borders for snapped shapes) */
+                float x0 = SDL_roundf(d.x * scx), x1 = SDL_roundf((d.x + d.w) * scx);
+                float y0 = SDL_roundf(d.y * scy), y1 = SDL_roundf((d.y + d.h) * scy);
+                d.x = x0 / scx; d.w = (x1 - x0) / scx; d.y = y0 / scy; d.h = (y1 - y0) / scy;
                 uint8_t a = (uint8_t)(l->argb >> 24);
                 SDL_SetRenderDrawBlendMode(g_ren, a == 255 ? SDL_BLENDMODE_NONE : SDL_BLENDMODE_BLEND);
                 SDL_SetRenderDrawColor(g_ren, (uint8_t)(l->argb >> 16), (uint8_t)(l->argb >> 8), (uint8_t)l->argb, a);
@@ -419,12 +441,17 @@ static void draw_layers(int space, bool panel){
 }
 
 /* test: SMS_WINDOW_SHOT=<file.ppm> [SMS_WINDOW_SHOT_FRAME=n] writes the composed window of the n-th
- * presented frame (default 1) as a PPM (works with --hidden); SMS_WINDOW_SHOT_EXIT=1 quits after it */
+ * presented frame (default 1) as a PPM (works with --hidden); SMS_WINDOW_SHOT_GFRAME=n instead takes
+ * the first presented frame at or after emulated frame n; SMS_WINDOW_SHOT_EXIT=1 quits after it */
+extern uint64_t glue_frame_count(void);
 static bool g_shot_quit;
 static void window_shot(void){
-    static long n = -1, target = 1; static const char *path;
-    if (n < 0){ path = getenv("SMS_WINDOW_SHOT"); const char *f = getenv("SMS_WINDOW_SHOT_FRAME"); if (f) target = atol(f); n = 0; }
-    if (!path || ++n != target) return;
+    static long n = -1, target = 1, gtarget = -1; static const char *path;
+    if (n < 0){ path = getenv("SMS_WINDOW_SHOT"); const char *f = getenv("SMS_WINDOW_SHOT_FRAME"); if (f) target = atol(f);
+                const char *g = getenv("SMS_WINDOW_SHOT_GFRAME"); if (g) gtarget = atol(g); n = 0; }
+    if (!path) return;
+    if (gtarget >= 0){ if (n || (long)glue_frame_count() < gtarget) return; n = 1; }
+    else if (++n != target) return;
     if (getenv("SMS_WINDOW_SHOT_EXIT")) g_shot_quit = true;
     int w, h; if (SDL_GetRendererOutputSize(g_ren, &w, &h) != 0 || w <= 0 || h <= 0) return;
     uint32_t *px = (uint32_t*)malloc((size_t)w * (size_t)h * 4); if (!px) return;

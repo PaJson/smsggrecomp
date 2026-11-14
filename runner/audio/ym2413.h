@@ -19,4 +19,7 @@ uint8_t fm_port_read(uint8_t port);
 /* Aux mixer callback for psg_set_aux_mixer(): `frames` = n interleaved stereo S16 frames
  * holding the PSG output at PSG rate; FM is added (and PSG optionally muted per $F2). */
 void    fm_mix(int16_t *frames, size_t n);
+/* Per-channel output gain, 0..256 (256 = unchanged): ch 0..8 melodic, 9..13 rhythm (BD, HH, SD,
+ * TOM, CYM). Host-side mixing (volume options), not chip state. */
+void    fm_set_channel_gain(unsigned ch, unsigned gain);
 #endif

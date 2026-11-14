@@ -170,6 +170,13 @@ void hud_rect(int space, float x, float y, float w, float h, uint32_t argb){
     memset(l, 0, sizeof *l);
     l->space = space; l->x = x; l->y = y; l->w = w; l->h = h; l->argb = argb;
 }
+void hud_marker(int space, float cx, float cy, float r, float rim, uint32_t fill_argb, uint32_t rim_argb){
+    if (!s_hires || s_nlayers >= MAX_LAYERS) return;
+    HudLayer *l = &s_layers[s_nlayers++];
+    memset(l, 0, sizeof *l);
+    l->space = space; l->x = cx; l->y = cy; l->w = r; l->h = rim; l->argb = fill_argb;
+    l->marker = true; l->rim_argb = rim_argb;
+}
 const HudLayer *hud_layers(int *n){ *n = s_nlayers; return s_layers; }
 void hud_layers_clear(void){ s_nlayers = 0; }
 
@@ -177,7 +184,7 @@ void hud_layers_clear(void){ s_nlayers = 0; }
  * Page 0 = the main options (hud_set_options); further pages are option pages (hud_add_option_page)
  * or drawn pages (hud_add_page / hud_add_page_ex). Option pages keep their own selection; -1 = the
  * tab row (only when there is more than one page). */
-#define MAX_PAGES 6
+#define MAX_PAGES 8
 typedef struct {
     const char      *name;
     const HudOption *opts; int nopts; int sel;     /* option page */

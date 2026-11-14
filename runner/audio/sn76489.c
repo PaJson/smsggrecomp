@@ -59,6 +59,7 @@ static SN76489 s_sn;
 /* 4-bit attenuation -> linear amplitude. 2 dB/step (×10^-0.1), 0xF = silence.
  * Peak 0x1FFF with per-channel /4 headroom so 4 summed channels (4*8191 =
  * 32764) just fit int16 on either stereo side. */
+static unsigned s_gain[4] = { 256, 256, 256, 256 };   /* psg_set_channel_gain (host mixing) */
 static const int16_t SN_VOL[16] = {
     0x1FFF, 0x196A, 0x1430, 0x1009, 0x0CBD, 0x0A1E, 0x0809, 0x0662,
     0x0512, 0x0407, 0x0333, 0x028A, 0x0204, 0x019A, 0x0146, 0x0000
@@ -132,7 +133,8 @@ static inline void sn_tick(SN76489 *p, int32_t amp[4])
             p->tone_counter[i] = p->tone_period[i] ? p->tone_period[i] : 1;
             p->tone_out[i] ^= 1;
         }
-        amp[i] = p->tone_out[i] ? SN_VOL[p->vol[i]] : -SN_VOL[p->vol[i]];
+        int32_t v = SN_VOL[p->vol[i]] * (int32_t)s_gain[i] / 256;
+        amp[i] = p->tone_out[i] ? v : -v;
     }
 
     if (--p->noise_counter <= 0) {
@@ -143,7 +145,8 @@ static inline void sn_tick(SN76489 *p, int32_t amp[4])
         p->lfsr = (uint16_t)((p->lfsr >> 1) | (fb << 15));
         p->noise_out = (uint8_t)(p->lfsr & 1);
     }
-    amp[3] = p->noise_out ? SN_VOL[p->vol[3]] : -SN_VOL[p->vol[3]];
+    int32_t vn = SN_VOL[p->vol[3]] * (int32_t)s_gain[3] / 256;
+    amp[3] = p->noise_out ? vn : -vn;
 }
 #endif
 
@@ -190,10 +193,11 @@ static void sn_prepare_mix(const SN76489 *p)
     for(unsigned bits=0;bits<16;bits++){
         int32_t l=0,r=0;
         for(unsigned i=0;i<4;i++){
-            int32_t amp=(bits&(1u<<i))?SN_VOL[p->vol[i]]:-SN_VOL[p->vol[i]];
+            int32_t v=SN_VOL[p->vol[i]]*(int32_t)s_gain[i]/256;
+            int32_t amp=(bits&(1u<<i))?v:-v;
             if(p->gg_stereo&(0x10u<<i))l+=amp;
             if(p->gg_stereo&(1u<<i))r+=amp;
-            if(SN_VOL[p->vol[i]] && (p->gg_stereo&((0x10u<<i)|(1u<<i))))s_audible|=1u<<i;
+            if(v && (p->gg_stereo&((0x10u<<i)|(1u<<i))))s_audible|=1u<<i;
         }
         s_mixL[bits]=l;s_mixR[bits]=r;
         if(l!=r)s_mono_mix=0;
@@ -295,6 +299,17 @@ static void sn_render_block(SN76489 *p,int16_t *out,size_t frames)
     }
 }
 #endif
+
+void psg_set_channel_gain(unsigned ch, unsigned gain)
+{
+    if (ch > 3) return;
+    if (gain > 256) gain = 256;
+    if (s_gain[ch] == gain) return;
+    s_gain[ch] = gain;
+#ifndef SMS_PSG_REFERENCE
+    if (s_inited) sn_prepare_mix(&s_sn);
+#endif
+}
 
 static void (*s_aux_mix)(int16_t *frames, size_t n);
 void psg_set_aux_mixer(void (*mix)(int16_t *frames, size_t n)){ s_aux_mix = mix; }

@@ -66,7 +66,7 @@ static const char *fragment=
  "uint pal=(flags&2048u)!=0u?16u:0u;uint k=pal+index;"
  "c=texelFetch(source,ivec2(96+int(k/4u),y),0)[int(k&3u)];"
  "if(info.w!=0u&&x<8)c=info.x;"
- "if((flags&4096u)==0u||index==0u){for(int s=int(info.z)-1;s>=0;s--){"
+ "if((flags&4096u)==0u||index==0u){for(int s=0;s<int(info.z);s++){"
  "uvec4 sp=texelFetch(source,ivec2(32+s,y),0);int dx=x-int(sp.y);"
  "if(dx<0||dx>=8)continue;uint v=pixel(sp.x,dx);if(v!=0u){"
  "c=texelFetch(source,ivec2(100+int(v/4u),y),0)[int(v&3u)];break;}}}}"

@@ -235,9 +235,14 @@ static void render_reference_lines(uint32_t *fb,int first,int last){
     int sbase = (g_vdp.reg[6] & 0x04) ? 256 : 0; /* pattern bank (tile +256) */
     int shift = (r0 & 0x08) ? 8 : 0;            /* early clock: X-8 */
 
-    for (int i = 0; i < 64; i++){
+    /* overlapping sprites: the one with the LOWEST table index is shown (also where it is hidden
+       behind a high-priority background pixel), so draw in reverse order */
+    static uint8_t spr_top[SMS_SCREEN_W * SMS_SCREEN_H];          /* 16 + colour of the top sprite, 0 = none */
+    memset(spr_top + SMS_SCREEN_W * first, 0, (size_t)SMS_SCREEN_W * (size_t)(last - first));
+    int nspr = 0;
+    while (nspr < 64 && g_vdp.vram[(sat + nspr) & 0x3FFF] != 0xD0) nspr++;   /* terminator (192-line mode) */
+    for (int i = nspr - 1; i >= 0; i--){
         int yraw = g_vdp.vram[(sat + i) & 0x3FFF];
-        if (yraw == 0xD0) break;                /* terminator (192-line mode) */
         int sy = (yraw + 1) & 0xFF;
         int sx = g_vdp.vram[(sat + 128 + i*2)     & 0x3FFF] - shift;
         int st = g_vdp.vram[(sat + 128 + i*2 + 1) & 0x3FFF];
@@ -253,11 +258,16 @@ static void render_reference_lines(uint32_t *fb,int first,int last){
                 if (x < 0 || x >= SMS_SCREEN_W) continue;
                 int c = tile_pixel(tile, rx, py);
                 if (c == 0) continue;            /* transparent */
-                if (bg_prio[y * SMS_SCREEN_W + x]) continue; /* behind hi-prio bg */
-                fb[y * SMS_SCREEN_W + x] = cram_argb(16 + c); /* sprite palette */
+                spr_top[y * SMS_SCREEN_W + x] = (uint8_t)(16 + c);   /* lower index drawn later = on top */
             }
         }
     }
+    for (int y = first; y < last; y++)
+        for (int x = 0; x < SMS_SCREEN_W; x++){
+            uint8_t c = spr_top[y * SMS_SCREEN_W + x];
+            if (!c || bg_prio[y * SMS_SCREEN_W + x]) continue;    /* none / behind hi-prio bg */
+            fb[y * SMS_SCREEN_W + x] = cram_argb(c);              /* sprite palette */
+        }
 }
 
 void vdp_render_reference(uint32_t *fb){render_reference_lines(fb,0,SMS_SCREEN_H);}
@@ -333,7 +343,8 @@ void vdp_render_jobs(const VdpFrameJob *f,uint32_t *fb){
                 color=j->word[96+(pal+c)/4][(pal+c)%4];
                 if (j->word[104][3] && x<8) color=j->word[104][0];
                 if (!(flags&0x1000) || !c){
-                    for (int s=(int)j->word[104][2]-1;s>=0;s--){
+                    /* the sprite with the LOWEST table index wins where sprites overlap */
+                    for (int s=0;s<(int)j->word[104][2];s++){
                         const uint32_t *sp=j->word[32+s];
                         int dx=x-(int32_t)sp[1];
                         if (dx<0 || dx>=8) continue;

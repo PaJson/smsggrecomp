@@ -38,6 +38,7 @@ uint64_t  g_frame_ic;   /* per-frame instruction count probe */
 
 static uint8_t  *g_rom;
 static size_t    g_rom_size;
+static int       g_native_banks = -1;  /* banks of the loaded ROM (-1 = not extended, glue_add_rom_bank) */
 static uint32_t  g_rom_crc;
 static uint8_t   g_ram[0x2000];     /* 8 KB system RAM ($C000-$DFFF) */
 static int       g_bank[3] = {0,1,2};
@@ -1278,6 +1279,10 @@ void glue_diff_init(void){
 
 /* ====================== dispatch miss ====================== */
 void sms_dispatch_miss(uint16_t addr){
+    if (addr >= 0x8000 && g_native_banks >= 0 && g_bank[2] >= g_native_banks && !sram_mapped()){
+        hybrid_interpret(addr);      /* added bank (glue_add_rom_bank): never recompiled, not a miss */
+        return;
+    }
     mb_record(addr);                 /* always-on bank-alias probe (env-gated dump) */
     manifest_record(addr);           /* always-on profile-guided discovery manifest */
     /* Log each newly-seen miss once - this is the static-analysis worklist
@@ -1338,6 +1343,19 @@ void sms_call_unbalanced(uint16_t at){
 
 /* ====================== lifecycle ====================== */
 uint8_t *glue_rom_image(size_t *size){ if (size) *size = g_rom_size; return g_rom; }
+static char g_rom_path[1024];
+const char *glue_rom_path(void){ return g_rom_path; }
+int glue_native_banks(void){ return g_native_banks >= 0 ? g_native_banks : (int)(g_rom_size / 0x4000); }
+int glue_add_rom_bank(const uint8_t *bank16k){
+    if (!g_rom || !bank16k || (g_rom_size & 0x3FFF)) return -1;   /* whole-bank images only */
+    if (g_native_banks < 0) g_native_banks = (int)(g_rom_size / 0x4000);
+    uint8_t *n = (uint8_t*)realloc(g_rom, g_rom_size + 0x4000);
+    if (!n) return -1;
+    memcpy(n + g_rom_size, bank16k, 0x4000);
+    g_rom = n; g_rom_size += 0x4000;
+    for (int s = 0; s < 3; s++) set_bank(s, g_bank[s]);           /* slot pointers into the new image */
+    return (int)(g_rom_size / 0x4000) - 1;
+}
 const uint8_t *glue_sram_image(size_t *size){ if (size) *size = sizeof g_sram; return g_sram; }
 const char    *glue_save_path(void){ return g_sav_path; }
 
@@ -1369,6 +1387,7 @@ bool glue_load_rom(const char *path){
     }
 #endif
     free(g_rom);g_rom=loaded;g_rom_size=got;g_rom_crc=crc;
+    snprintf(g_rom_path,sizeof g_rom_path,"%s",path);
     {   /* save file: <rom>.sav next to the ROM, or <SMS_SAVE_DIR>/<rom name>.sav when that is set */
         const char *sd=getenv("SMS_SAVE_DIR");
         if (sd && sd[0]){

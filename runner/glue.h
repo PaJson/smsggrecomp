@@ -13,6 +13,13 @@ bool     glue_load_rom(const char *path);
 
 /* Writable view of the loaded ROM image (for per-game data patches applied in on_post_reset). */
 uint8_t *glue_rom_image(size_t *size);
+/* Append a 16 KB bank (e.g. another ROM's sound driver bank) to the ROM image; returns its bank
+ * number (= old bank count), or -1. Call it before anything caches glue_rom_image() (the image is
+ * reallocated). Code in such an added bank is not recompiled: calls into it (slot 2) run in the
+ * hybrid interpreter silently (no dispatch-miss log, no manifest seed). */
+int      glue_add_rom_bank(const uint8_t *bank16k);
+int      glue_native_banks(void);                 /* banks of the loaded ROM itself */
+const char *glue_rom_path(void);                  /* path of the loaded ROM (as given) */
 
 /* Write cartridge (battery) RAM to <rom>.sav if it changed. */
 void     glue_sram_flush(void);

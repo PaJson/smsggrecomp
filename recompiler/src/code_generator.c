@@ -951,8 +951,11 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
             if (h >= 0){
                 uint16_t rs = G_CFG->ih_resume[h];
                 if (h < 64) G_IH_USED[h]++;
-                if (tr_has(rs)) fprintf(o,"    if (%s()) goto L_%04X;   /* [insn_hooks] */\n", G_CFG->ih_func[h], rs);
-                else            fprintf(o,"    if (%s()) { call_by_address(0x%04X); return; }   /* [insn_hooks] */\n", G_CFG->ih_func[h], rs);
+                /* hook result: 0 = run the original instruction, 1 = continue at `resume`,
+                   2 = return from this function now (the hook did the RET itself, e.g. it ran a
+                   driver whose RET popped this function's return address) */
+                if (tr_has(rs)) fprintf(o,"    { int _ih = %s(); if (_ih == 2) return; if (_ih) goto L_%04X; }   /* [insn_hooks] */\n", G_CFG->ih_func[h], rs);
+                else            fprintf(o,"    { int _ih = %s(); if (_ih == 2) return; if (_ih) { call_by_address(0x%04X); return; } }   /* [insn_hooks] */\n", G_CFG->ih_func[h], rs);
             }
         }
         if(k>span_end){

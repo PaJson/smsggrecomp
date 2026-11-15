@@ -131,7 +131,8 @@ static uint8_t key_to_pad(SDL_Keycode k){
 
 /* Game controllers (SDL GameController API: Xbox/PlayStation/Switch-style pads, any SDL mapping).
  * D-pad or left stick = D-pad; A/X (south/west) = button 1, B/Y (east/north) = button 2;
- * Start = Start (GG) / Pause (SMS; the HUD instead in games with a side panel, hud_start_opens); right trigger held = fast-forward at hud_turbo_speed() (like TAB), left trigger
+ * Start = Start (GG) / the HUD (SMS, hud_start_opens); Back (SMS) = side panel, or the console's Pause in games
+ * without a panel; right trigger held = fast-forward at hud_turbo_speed() (like TAB), left trigger
  * held = slow motion x0.5. Shoulder buttons: HUD tabs while the HUD is open, else the game's extra
  * buttons (hud_extra_buttons: LB = HUD_EXTRA_1, RB = HUD_EXTRA_2; keyboard C / V). All pads drive P1. */
 static uint8_t g_pad_btn, g_pad_axis;   /* masks from controller buttons / left stick */
@@ -155,7 +156,8 @@ static uint8_t pad_button(Uint8 b){
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return SMS_PAD_RIGHT;
         case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_X: return SMS_PAD_B1;
         case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_Y: return SMS_PAD_B2;
-        case SDL_CONTROLLER_BUTTON_START:      return hud_start_opens() ? 0 : SMS_PAD_START | SMS_PAD_PAUSE;
+        case SDL_CONTROLLER_BUTTON_START:      return hud_start_opens() ? 0 : SMS_PAD_START;
+        case SDL_CONTROLLER_BUTTON_BACK:       return hud_start_opens() && !hud_has_panel() ? SMS_PAD_PAUSE : 0;
         default: return 0;
     }
 }
@@ -539,8 +541,8 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
         else if (e.type == SDL_CONTROLLERDEVICEREMOVED){     /* pad timed out / unplugged: release all */
             g_pad_btn = 0; g_pad_axis = 0; g_pad_turbo = g_pad_slow = false; g_extra_pad = 0; nav_clear();
         }
-        /* ---- settings HUD (hud.c): F1 / pad Start (SMS + panel, hud_start_opens) or Back toggles;
-           while open it owns the keys. Pad Back / F2 = side panel on / off (hud_toggle_panel). ---- */
+        /* ---- settings HUD (hud.c): F1 / pad Start (SMS, hud_start_opens) or Back (GG) toggles;
+           while open it owns the keys. SMS pad Back / F2 = side panel on / off (hud_toggle_panel), Back = Pause without a panel. ---- */
         else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F1){ if (!e.key.repeat) hud_toggle(); }
         else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F2){ if (!e.key.repeat) hud_toggle_panel(); }
         /* F11 or Alt+Enter: fullscreen (desktop resolution, letterboxed) <-> window */
@@ -550,7 +552,9 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
             SDL_SetWindowFullscreen(g_win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
         }
         else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK){
-            if (hud_start_opens() && hud_has_panel()) hud_toggle_panel(); else hud_toggle();
+            if (!hud_start_opens() || hud_is_open()) hud_toggle();          /* GG: Back = HUD; SMS: closes it */
+            else if (hud_has_panel()) hud_toggle_panel();
+            else g_pad_btn |= SMS_PAD_PAUSE;                               /* the console's Pause (NMI) */
         }
         else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_START && hud_start_opens()) hud_toggle();
         else if (hud_is_open() && e.type == SDL_KEYDOWN){

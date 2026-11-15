@@ -470,15 +470,17 @@ static void draw_layers(int space, bool panel){
 
 /* test: SMS_WINDOW_SHOT=<file.ppm> [SMS_WINDOW_SHOT_FRAME=n] writes the composed window of the n-th
  * presented frame (default 1) as a PPM (works with --hidden); SMS_WINDOW_SHOT_GFRAME=n instead takes
- * the first presented frame at or after emulated frame n; SMS_WINDOW_SHOT_EXIT=1 quits after it */
+ * the first presented frame at or after emulated frame n (SMS_WINDOW_SHOT_SKIP=k: the k-th presented frame
+ * after it, e.g. inside the HUD, where the emulated frame stands still); SMS_WINDOW_SHOT_EXIT=1 quits after it */
 extern uint64_t glue_frame_count(void);
 static bool g_shot_quit;
 static void window_shot(void){
-    static long n = -1, target = 1, gtarget = -1; static const char *path;
+    static long n = -1, target = 1, gtarget = -1, skip = 0; static const char *path;
     if (n < 0){ path = getenv("SMS_WINDOW_SHOT"); const char *f = getenv("SMS_WINDOW_SHOT_FRAME"); if (f) target = atol(f);
-                const char *g = getenv("SMS_WINDOW_SHOT_GFRAME"); if (g) gtarget = atol(g); n = 0; }
+                const char *g = getenv("SMS_WINDOW_SHOT_GFRAME"); if (g) gtarget = atol(g);
+                const char *k = getenv("SMS_WINDOW_SHOT_SKIP"); if (k) skip = atol(k); n = 0; }
     if (!path) return;
-    if (gtarget >= 0){ if (n || (long)glue_frame_count() < gtarget) return; n = 1; }
+    if (gtarget >= 0){ if (n || (long)glue_frame_count() < gtarget) return; if (skip > 0){ skip--; return; } n = 1; }
     else if (++n != target) return;
     if (getenv("SMS_WINDOW_SHOT_EXIT")) g_shot_quit = true;
     int w, h; if (SDL_GetRendererOutputSize(g_ren, &w, &h) != 0 || w <= 0 || h <= 0) return;

@@ -157,7 +157,7 @@ static uint8_t pad_button(Uint8 b){
         case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_X: return SMS_PAD_B1;
         case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_Y: return SMS_PAD_B2;
         case SDL_CONTROLLER_BUTTON_START:      return hud_start_opens() ? 0 : SMS_PAD_START;
-        case SDL_CONTROLLER_BUTTON_BACK:       return hud_start_opens() && !hud_has_panel() ? SMS_PAD_PAUSE : 0;
+        case SDL_CONTROLLER_BUTTON_BACK:       return hud_back_pauses() ? SMS_PAD_PAUSE : 0;
         default: return 0;
     }
 }
@@ -553,7 +553,7 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
         }
         else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK){
             if (!hud_start_opens() || hud_is_open()) hud_toggle();          /* GG: Back = HUD; SMS: closes it */
-            else if (hud_has_panel()) hud_toggle_panel();
+            else if (!hud_back_pauses()) hud_toggle_panel();
             else g_pad_btn |= SMS_PAD_PAUSE;                               /* the console's Pause (NMI) */
         }
         else if (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_START && hud_start_opens()) hud_toggle();

@@ -157,6 +157,9 @@ void hud_toggle_panel(void){
 void hud_set_start_free(bool free){ s_start_free = free; }
 bool hud_start_opens(void){ return s_start_free; }   /* SMS: pad Start = HUD; pad Back = side panel or the console's Pause */
 bool hud_has_panel(void){ return s_panel_draw != NULL; }
+static bool s_back_pause;
+void hud_set_back_pause(bool on){ s_back_pause = on; }
+bool hud_back_pauses(void){ return s_start_free && (s_panel_draw == NULL || s_back_pause); }
 void hud_panel_render(uint32_t *buf, int w, int h){
     if (s_panel_draw) s_panel_draw(buf, w, h);
     else for (int i = 0; i < w * h; i++) buf[i] = 0xFF000000u;

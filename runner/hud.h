@@ -103,6 +103,10 @@ void hud_set_on_panel_toggle(void (*cb)(bool on));
 void hud_set_start_free(bool free);                   /* host */
 bool hud_start_opens(void);
 bool hud_has_panel(void);
+/* SMS: pad Back = the console's Pause even though the game has a side panel (the panel is then
+ * toggled with F2 or the game's own option). Default: Back toggles the panel when there is one. */
+void hud_set_back_pause(bool on);
+bool hud_back_pauses(void);                           /* SMS pad Back = Pause (no panel, or set above) */
 void hud_panel_render(uint32_t *buf, int w, int h);   /* host: fill the panel image */
 
 /* High-resolution layers: images and rectangles the SDL host draws at the window's REAL pixel

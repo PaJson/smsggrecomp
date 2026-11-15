@@ -32,6 +32,7 @@ $options=@('-S',$ProjectRoot,'-B',$buildPath,'-G','Ninja','-DCMAKE_BUILD_TYPE=Re
     ('-DSMSGG_REFERENCE_VDP='+$(if($ReferenceVDP){'ON'}else{'OFF'})),
     ('-DSMSGG_NATIVE_EXECUTION='+$(if($ReferenceExecution){'OFF'}else{'ON'})))
 if($Rom) { $options+="-DSMSGG_ROM=$((Resolve-Path -LiteralPath $Rom).Path)" }
+& (Join-Path $PSScriptRoot 'repair_moved_build.ps1') -Build $buildPath -Cmake $cmake   # project folder moved/renamed
 Invoke-Native $cmake $options
 Invoke-Native $cmake @('--build',$buildPath,'--parallel',"$Jobs")
 Write-Host "Build ready in $buildPath"

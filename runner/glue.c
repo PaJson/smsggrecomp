@@ -24,6 +24,7 @@
 #ifdef SMSGG_HAVE_GAME_LAYOUT
 #include "game_spec.h"
 #include "hud.h"
+#include "safe_file.h"
 #endif
 
 #include <stdio.h>
@@ -67,8 +68,10 @@ static void set_bank(int slot,int bank){
 }
 void glue_sram_flush(void){
     if (!g_sram_dirty || !g_sav_path[0]) return;
-    FILE *f=fopen(g_sav_path,"wb");
-    if (f){ fwrite(g_sram,1,sizeof g_sram,f); fclose(f); g_sram_dirty=false; }
+    FILE *f=safe_fopen_w(g_sav_path,"wb");     /* "<sav>.tmp", then swapped in: a crash keeps the old save */
+    if (f){ fwrite(g_sram,1,sizeof g_sram,f); if (safe_fclose(f,g_sav_path)) g_sram_dirty=false;
+            else fprintf(stderr,"[sram] could not write %s (old save kept)\n", g_sav_path); }
+    else fprintf(stderr,"[sram] could not create %s.tmp (old save kept)\n", g_sav_path);
 }
 static bool      g_mapper_cm;        /* Codemasters mapper */
 

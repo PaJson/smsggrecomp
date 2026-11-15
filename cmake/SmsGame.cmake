@@ -49,7 +49,7 @@ function(sms_add_game TARGET)
     endif()
     add_executable(${TARGET} ${_sources}
         "${_engine}/runner/main.c" "${_engine}/runner/glue.c"
-        "${_engine}/runner/coverage_route.c" "${_engine}/runner/hud.c" "${_engine}/runner/art.c"
+        "${_engine}/runner/coverage_route.c" "${_engine}/runner/hud.c" "${_engine}/runner/art.c" "${_engine}/runner/safe_file.c"
         "${_engine}/runner/video/sms_vdp.c" "${_engine}/runner/audio/sn76489.c" "${_engine}/runner/audio/ym2413.c" "${_engine}/runner/audio/emu2413.c"
         "${_engine}/runner/external/superzazu/z80.c")
     target_compile_features(${TARGET} PRIVATE c_std_11)

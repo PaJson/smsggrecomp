@@ -252,8 +252,8 @@ static void render_reference_lines(uint32_t *fb,int first,int last){
         for (int i = 0; i < nspr; i++){
             int sy = (g_vdp.vram[(sat + i) & 0x3FFF] + 1) & 0xFF;
             for (int ry = 0; ry < sh; ry++){
-                int y = sy + ry;
-                if (y >= SMS_SCREEN_H) break;
+                int y = (sy + ry) & 0xFF;               /* lines are compared in 8 bits: wraps to the top */
+                if (y >= SMS_SCREEN_H) continue;
                 if (line_cnt[y] < g_vdp_sprite_limit){ line_cnt[y]++; spr_line_ok[y] |= 1ull << i; }
             }
         }
@@ -266,7 +266,7 @@ static void render_reference_lines(uint32_t *fb,int first,int last){
         if (r1 & 0x02) st &= 0xFE;
 
         for (int ry = 0; ry < sh; ry++){
-            int y = sy + ry;
+            int y = (sy + ry) & 0xFF;   /* 8-bit line compare: a sprite near Y 255 continues at line 0 */
             if (y < first || y >= last) continue;
             if (g_vdp_sprite_limit > 0 && !(spr_line_ok[y] >> i & 1)) continue;
             int tile = sbase + st + (ry >> 3);
@@ -327,7 +327,7 @@ static void prepare_line(VdpLineJob *j, int y){
     for (int i=0;i<64;i++){
         int raw=g_vdp.vram[(sat+i)&0x3fff];
         if (raw==0xd0) break;
-        int sy=(raw+1)&255, ry=y-sy;
+        int sy=(raw+1)&255, ry=(y-sy)&255;   /* 8-bit compare: sprites near Y 255 wrap to the top */
         if (ry<0 || ry>=sh) continue;
         if (g_vdp_sprite_limit>0 && cnt++>=g_vdp_sprite_limit) break;   /* hardware: 9th+ sprite dropped */
         int sx=g_vdp.vram[(sat+128+i*2)&0x3fff]-((r0&8)?8:0);

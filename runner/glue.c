@@ -588,7 +588,7 @@ static void frame_completed(void){
         int sat=(g_vdp.reg[5]&0x7E)<<7, sh=(g_vdp.reg[1]&2)?16:8, maxc=0, over=0;
         uint8_t cnt[256]={0};
         for(int i=0;i<64;i++){ int raw=g_vdp.vram[(sat+i)&0x3FFF]; if(raw==0xD0) break;
-          for(int r=0;r<sh;r++){ int y=((raw+1)&0xFF)+r; if(y<192) cnt[y]++; } }
+          for(int r=0;r<sh;r++){ int y=(raw+1+r)&0xFF; if(y<192) cnt[y]++; } }   /* 8-bit: wraps to the top */
         for(int y=0;y<192;y++){ if(cnt[y]>maxc) maxc=cnt[y]; if(cnt[y]>=scan) over++; }
         if(over) fprintf(stderr,"SPRSCAN %llu max %d lines %d\n",(unsigned long long)g_frame,maxc,over);
       } }

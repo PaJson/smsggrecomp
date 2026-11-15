@@ -496,6 +496,28 @@ static void window_shot(void){
     free(px);
 }
 
+/* The side panel at a non-integer window scale (e.g. 3.75 at 3840 x 2160): plain nearest scaling gave
+ * text strokes of uneven width (user report). "Sharp bilinear" like the hi-res layers: nearest to the
+ * next whole multiple in a render target, then linear to the real size (no blur at whole scales). */
+static SDL_Texture *g_panel_big; static int g_panel_k;
+static void panel_copy(const SDL_Rect *side){
+    float scx = 1, scy = 1; SDL_RenderGetScale(g_ren, &scx, &scy);
+    int k = (int)SDL_ceilf(side->h * scy / HUD_PANEL_H - 0.01f);
+    if (k <= 1 || k > 8 || !g_target_ok){ SDL_RenderCopy(g_ren, g_panel_tex, NULL, side); return; }
+    if (!g_panel_big || g_panel_k != k){
+        if (g_panel_big) SDL_DestroyTexture(g_panel_big);
+        g_panel_big = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, HUD_PANEL_W * k, HUD_PANEL_H * k);
+        g_panel_k = k;
+        if (!g_panel_big){ SDL_RenderCopy(g_ren, g_panel_tex, NULL, side); return; }
+        SDL_SetTextureScaleMode(g_panel_big, SDL_ScaleModeLinear);
+    }
+    SDL_SetTextureScaleMode(g_panel_tex, SDL_ScaleModeNearest);
+    SDL_SetRenderTarget(g_ren, g_panel_big);
+    SDL_RenderCopy(g_ren, g_panel_tex, NULL, NULL);
+    SDL_SetRenderTarget(g_ren, NULL);
+    SDL_RenderCopy(g_ren, g_panel_big, NULL, side);
+}
+
 bool host_present(const uint32_t *fb, int fb_w, int fb_h){
 #ifdef SMS_GPU
     if(g_gpu)host_gl_present(vdp_frame_jobs());else
@@ -514,7 +536,7 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
         draw_layers(HUD_SPACE_GAME, true);
         hud_panel_render(g_panel_buf, HUD_PANEL_W, HUD_PANEL_H);
         SDL_UpdateTexture(g_panel_tex, NULL, g_panel_buf, HUD_PANEL_W * (int)sizeof(uint32_t));
-        SDL_RenderCopy(g_ren, g_panel_tex, NULL, &side);
+        panel_copy(&side);
         draw_layers(HUD_SPACE_PANEL, true);
     } else {
         SDL_RenderCopy(g_ren, g_tex, &g_src, NULL);
@@ -625,6 +647,8 @@ void host_shutdown(void){
     g_gpu=false;
     if (g_panel_tex) SDL_DestroyTexture(g_panel_tex);
     g_panel_tex = NULL; g_panel_on = false;
+    if (g_panel_big) SDL_DestroyTexture(g_panel_big);
+    g_panel_big = NULL; g_panel_k = 0;
     for (int i = 0; i < N_LAYER_TEX; i++) lt_free(&g_lt[i]);
     hud_set_hires(false);
     if (g_tex) SDL_DestroyTexture(g_tex);

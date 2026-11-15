@@ -390,11 +390,15 @@ bool trace_computed_call_push(const TraceResult *t, uint16_t jp_addr, uint16_t *
                  * leaves the stack shape unknown. */
                 case 0x33: if (++incsp == 2){ incsp=0; ispop=1; } break;
                 case 0x3B: case 0xF9: case 0x31: return false;
+                case 0xE3: return false;      /* ex (sp),hl: the top word is no longer the pushed one */
             }
         } else if (in->prefix==Z80_PFX_DD || in->prefix==Z80_PFX_FD){
             if      (in->opcode==0xE5) preg=(in->prefix==Z80_PFX_DD)?4:5;
             else if (in->opcode==0xE1) ispop=1;
             else if (in->opcode==0xF9) return false;     /* ld sp,ix/iy */
+            else if (in->opcode==0xE3) return false;     /* ex (sp),ix/iy */
+        } else if (in->prefix==Z80_PFX_ED && in->opcode==0x7B){
+            return false;                               /* ld sp,(nn) */
         }
         if (ispop){ pend++; continue; }
         if (preg>=0){
@@ -510,11 +514,15 @@ static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *con
                  * leaves the stack shape unknown. */
                 case 0x33: if (++incsp == 2){ incsp=0; ispop=1; } break;
                 case 0x3B: case 0xF9: case 0x31: return false;
+                case 0xE3: return false;      /* ex (sp),hl: the top word is no longer the pushed one */
             }
         } else if (in->prefix==Z80_PFX_DD || in->prefix==Z80_PFX_FD){
             if      (in->opcode==0xE5) preg=(in->prefix==Z80_PFX_DD)?4:5;
             else if (in->opcode==0xE1) ispop=1;
             else if (in->opcode==0xF9) return false;     /* ld sp,ix/iy */
+            else if (in->opcode==0xE3) return false;     /* ex (sp),ix/iy */
+        } else if (in->prefix==Z80_PFX_ED && in->opcode==0x7B){
+            return false;                               /* ld sp,(nn) */
         }
         if (ispop){ pend++; continue; }
         if (preg>=0){
@@ -630,6 +638,7 @@ static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1){
                     else if (is_pop(in)) { if (s.depth>0) s.depth--; else s.depth=-1; }
                     else if (in->prefix==Z80_PFX_NONE && (in->opcode==0x33||in->opcode==0x3B||in->opcode==0xF9||in->opcode==0x31||in->opcode==0xE3)) s.depth=-1;
                     else if ((in->prefix==Z80_PFX_DD||in->prefix==Z80_PFX_FD) && (in->opcode==0xF9||in->opcode==0xE3)) s.depth=-1;
+                    else if (in->prefix==Z80_PFX_ED && in->opcode==0x7B) s.depth=-1;   /* ld sp,(nn) */
                 }
                 uint16_t c;
                 bool ft=false; int tj=-1;

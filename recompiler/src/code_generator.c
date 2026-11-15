@@ -324,6 +324,23 @@ static bool tr_has(uint16_t a){
     for (int i=0;i<G_TR->insn_count;i++) if (G_TR->insns[i].addr==a) return true;
     return false;
 }
+/* Instruction k can continue at addr+len (no transfer, not-taken jp/jr/djnz/ret cc, a call's
+ * return, halt) but the next emitted instruction is not that address (overlapping decode or the
+ * trace stopped): the emitter must jump there explicitly. A single block-I/O insn stopped at an
+ * entry already emits its own call_by_address. Sets *nx = the real successor. */
+static int G_GAPS;   /* count per run (summary line) */
+static bool fallthrough_gap(const TraceResult *t, int k, uint16_t *nx){
+    const Z80Insn *in = &t->insns[k].insn;
+    if (!(in->cf==Z80_CF_NONE || in->cf==Z80_CF_JUMP_COND || in->cf==Z80_CF_CALL ||
+          in->cf==Z80_CF_CALL_COND || in->cf==Z80_CF_RET_COND)) return false;
+    *nx = (uint16_t)(t->insns[k].addr + in->length);
+    if (k+1 < t->insn_count && t->insns[k+1].addr == *nx) return false;
+    if (in->cf==Z80_CF_NONE && z80_is_blockio_single(in)){
+        bool has=false; for (int i=0;i<t->insn_count;i++) if (t->insns[i].addr==*nx){ has=true; break; }
+        if (!has) return false;     /* emitter already tail-calls the next entry */
+    }
+    return true;
+}
 /* Distinct runtime banks for which an entry exists at address T (a -1/fixed
  * entry maps to the slot's default bank). >1 means the address is bank-
  * MULTIPLEXED: different code runs depending on the live slot bank. */
@@ -873,6 +890,19 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
         }
     }
 
+    /* Fall-through gaps: instructions are emitted in address order, so an instruction whose
+     * successor (addr+len) is NOT the next emitted instruction would silently run on into the
+     * wrong code. That happens when the trace holds overlapping decodes (a jump target inside an
+     * instruction, e.g. from data decoded as code: Golvellius `$38AB ld hl,$3972` ran on into
+     * `$38AC ld (hl),d`) or stops early (data / illegal bytes after it). The emitter then jumps
+     * to the real successor explicitly (fallthrough_gap below); its label is made here. */
+    for (int k=0;k<tr.insn_count;k++){
+        uint16_t nx;
+        if (!fallthrough_gap(&tr, k, &nx) || !tr_has(nx)) continue;
+        bool seen=false; for (int j=0;j<nlbl;j++) if (lbl[j]==nx){ seen=true; break; }
+        if (!seen) lbl[nlbl++]=nx;
+    }
+
     /* [insn_hooks]: the hooked instruction and its resume point are labels, so native spans
      * never fuse across them and the hook's goto resolves. */
     for (int k=0;k<tr.insn_count;k++){
@@ -998,6 +1028,14 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
             emit_cf(o,in,a);
         }
         if(k==span_end)fprintf(o,"    } /* instruction-boundary fallback */\n");
+        {   uint16_t nx;    /* after the span close, so both span paths take it */
+            if (fallthrough_gap(&tr, k, &nx)){
+                G_GAPS++;
+                if (getenv("SMSREC_GAP_LOG")) fprintf(stderr,"[gap] %s: %04X %s -> %04X%s\n", fe->name, a, in->text, nx, tr_has(nx) ? "" : " (not in trace)");
+                if (tr_has(nx)) fprintf(o,"    goto L_%04X;   /* fall-through gap: the next emitted instruction is not $%04X */\n", nx, nx);
+                else            fprintf(o,"    call_by_address(0x%04X); return;   /* fall-through gap: $%04X is not in this trace */\n", nx, nx);
+            }
+        }
     }
     fprintf(o,"}\n\n");
     G_BS = NULL;
@@ -1157,6 +1195,7 @@ void cg_emit(const SmsRom *rom, const FuncList *fl, const GameConfig *cfg, const
     free(ents);
     printf("[cg_emit] wrote %d functions to %s/%s_{full,dispatch,layout}.c (+%s_funcs.h)\n",
            emitted, out_dir, pfx, pfx);
+    if (G_GAPS) printf("[cg_emit] %d fall-through gaps (overlapping or truncated decodes) jump explicitly to their successor (SMSREC_GAP_LOG=1 lists them)\n", G_GAPS);
 }
 
 /* ======================================================================== *

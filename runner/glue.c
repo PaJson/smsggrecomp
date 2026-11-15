@@ -161,6 +161,15 @@ static void    (*g_audio_sink)(const int16_t *stereo_frames, size_t frame_count)
  * through the same sms_io_in, so input reaches recomp and hybrid/interp alike. */
 static uint8_t   g_pad1, g_pad2;
 static uint8_t (*g_input_cb)(uint64_t frame);   /* headless scripted input */
+/* SMS console Pause button (SMS_PAD_PAUSE): a press (released -> pressed) requests one NMI,
+ * taken at the next sync point (recompiled path), the next instruction (hybrid / --interp). */
+static bool      g_nmi_req, g_pause_held;
+static void pad1_set(uint8_t m){
+    bool p = (m & SMS_PAD_PAUSE) != 0;
+    if (p && !g_pause_held && !g_is_gg) g_nmi_req = true;
+    g_pause_held = p;
+    g_pad1 = m;
+}
 
 /* ---- per-frame VDP-state trace (oracle: query, don't probe) ----
  * When enabled, every frame appends a hash of the FULL VDP state (VRAM, CRAM,
@@ -598,7 +607,7 @@ static void frame_completed(void){
 #ifdef SMSGG_HAVE_GAME_LAYOUT
     if (g_game_spec.on_frame_post) g_game_spec.on_frame_post(g_frame);   /* per-game hook: state of the frame just finished */
 #endif
-    if (g_input_cb) g_pad1 = g_input_cb(g_frame);   /* scripted input for the upcoming frame */
+    if (g_input_cb) pad1_set(g_input_cb(g_frame));   /* scripted input for the upcoming frame */
 #ifdef SMSGG_HAVE_GAME_LAYOUT
     if (g_game_spec.on_frame_pre) g_game_spec.on_frame_pre(g_frame);
 #endif
@@ -849,6 +858,19 @@ static void take_irq(void){
     call_by_address(0x0038);             /* IM1 vector; RET unwinds back here */
 }
 
+/* SMS Pause button = NMI: IFF1 copied to IFF2 and cleared, PC pushed, vector $0066; the
+ * handler's RETN restores IFF1 from IFF2 and returns here (same C-stack contract as take_irq). */
+static void take_nmi(void){
+    g_nmi_req = false;
+    g_z80.cyc += 11;                     /* NMI acceptance (superzazu: 11 T-states) */
+    g_z80.iff2 = g_z80.iff1; g_z80.iff1 = false;
+    g_z80.halted = false;
+    g_z80.r = (uint8_t)((g_z80.r & 0x80) | ((g_z80.r + 1) & 0x7f));
+    g_z80.sp = (uint16_t)(g_z80.sp - 2);
+    sms_write16(g_z80.sp, g_dbg_pc);
+    call_by_address(0x0066);
+}
+
 /* Advance the VDP up to absolute cycle `cyc`, stepping scanlines and firing
  * frame_completed() at each frame boundary. Shared by sms_sync (recompiled
  * path) and the hybrid interpreter so both drive video timing identically. */
@@ -898,6 +920,7 @@ void sms_sync(void){
     }
 #endif
     advance_vdp(g_z80.cyc);
+    if (g_nmi_req && !g_diff_freeze) take_nmi();
     if (vdp_irq_asserted() && g_z80.iff1 && !g_z80.ei_block)
         take_irq();
     sms_set_sync_deadline();
@@ -1039,6 +1062,9 @@ static void hybrid_interpret(uint16_t addr){
     int depth = 0;
     for (;;){
         bool took_int = false;
+        if (!g_diff_freeze && g_nmi_req){            /* Pause button: NMI, accepted by the next step */
+            g_nmi_req = false; z80_gen_nmi(&g_hz); took_int = true;
+        } else
         if (!g_diff_freeze && vdp_irq_asserted() && g_hz.iff1 && !g_hz.int_pending){
             z80_gen_int(&g_hz, 0xFF);    /* IM1: vector 0x0038 (data ignored) */
             took_int = true;             /* the next step accepts it, pushing a return */
@@ -1434,6 +1460,7 @@ void glue_init(bool is_gg, uint64_t frame_limit){
     fm_reset();                          /* YM2413 (only audible if the game enables it via $F2) */
     g_psg_cyc = 0;
     g_pad1 = g_pad2 = 0;                  /* controllers idle */
+    g_nmi_req = g_pause_held = false;
     g_hybrid_cyc = g_hybrid_calls = 0;
     glue_diff_init();                    /* differential harness (env-gated, no-op unless SMS_DIFF_ADDR) */
     if (!g_cov_bits) cov_init();         /* function coverage (env-gated, SMS_COVERAGE) */
@@ -1452,7 +1479,8 @@ void glue_run_interp(void){
 
     if (setjmp(g_quit_env) == 0){
         for (;;){
-            if (vdp_irq_asserted() && g_hz.iff1 && !g_hz.int_pending)
+            if (g_nmi_req){ g_nmi_req = false; z80_gen_nmi(&g_hz); }   /* Pause button */
+            else if (vdp_irq_asserted() && g_hz.iff1 && !g_hz.int_pending)
                 z80_gen_int(&g_hz, 0xFF);          /* IM1 vector 0x0038 */
             g_dbg_pc = g_hz.pc; z80_step(&g_hz); g_frame_ic++;
             advance_vdp(g_hz.cyc);                  /* frame dump/limit/cb here */
@@ -1546,7 +1574,7 @@ void     glue_set_audio_sink(void (*sink)(const int16_t *stereo_frames, size_t f
 }
 uint32_t glue_audio_sample_rate(void){ return psg_sample_rate(); }
 double   glue_frame_rate(void){ return (double)SMS_Z80_HZ / (double)SMS_CYC_PER_FRAME; }
-void     glue_set_pad1(uint8_t pressed){ g_pad1 = pressed; }
+void     glue_set_pad1(uint8_t pressed){ pad1_set(pressed); }
 void     glue_set_pad2(uint8_t pressed){ g_pad2 = pressed; }
 void     glue_set_input_cb(uint8_t (*cb)(uint64_t frame)){ g_input_cb = cb; }
 uint64_t glue_frame_count(void){ return g_frame; }

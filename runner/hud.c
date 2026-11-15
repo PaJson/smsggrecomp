@@ -155,7 +155,7 @@ void hud_toggle_panel(void){
     if (s_panel_cb) s_panel_cb(s_panel_on);
 }
 void hud_set_start_free(bool free){ s_start_free = free; }
-bool hud_start_opens(void){ return s_start_free; }
+bool hud_start_opens(void){ return s_start_free && s_panel_draw != NULL; }   /* else pad Start = the console's Pause */
 bool hud_has_panel(void){ return s_panel_draw != NULL; }
 void hud_panel_render(uint32_t *buf, int w, int h){
     if (s_panel_draw) s_panel_draw(buf, w, h);

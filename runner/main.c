@@ -151,6 +151,7 @@ static uint8_t press_keys_to_mask(const char *s){
             case 'A': case 'a': m|=SMS_PAD_B1;    break;
             case 'B': case 'b': m|=SMS_PAD_B2;    break;
             case 'S': case 's': m|=SMS_PAD_START; break;
+            case 'P': case 'p': m|=SMS_PAD_PAUSE; break;   /* SMS console Pause (NMI) */
             default: break;   /* ignore separators */
         }
     }

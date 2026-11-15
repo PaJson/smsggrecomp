@@ -108,12 +108,12 @@ bool host_init(int fb_w, int fb_h,
     if (!g_tex){ fprintf(stderr, "[host] CreateTexture: %s\n", SDL_GetError()); return false; }
     g_target_ok = SDL_RenderTargetSupported(g_ren);
     hud_set_hires(true);
-    hud_set_start_free(!glue_is_gg());                 /* SMS: no Pause button emulated -> Start is free */
+    hud_set_start_free(!glue_is_gg());                 /* SMS: pad Start = HUD in games with a side panel, else Pause */
     return true;
 }
 
 /* Keyboard -> SMS controller. Arrows = D-pad, Z/X = buttons 1/2 (Sonic: jump),
- * Enter = Start (Game Gear). Esc quits. */
+ * Enter = Start (Game Gear) / the console's Pause button (SMS, an NMI). Esc quits. */
 static uint8_t g_pad;     /* live P1 mask (SMS_PAD_*) */
 
 static uint8_t key_to_pad(SDL_Keycode k){
@@ -124,14 +124,14 @@ static uint8_t key_to_pad(SDL_Keycode k){
         case SDLK_RIGHT:  return SMS_PAD_RIGHT;
         case SDLK_z:      return SMS_PAD_B1;
         case SDLK_x:      return SMS_PAD_B2;
-        case SDLK_RETURN: return SMS_PAD_START;
+        case SDLK_RETURN: return SMS_PAD_START | SMS_PAD_PAUSE;
         default:          return 0;
     }
 }
 
 /* Game controllers (SDL GameController API: Xbox/PlayStation/Switch-style pads, any SDL mapping).
  * D-pad or left stick = D-pad; A/X (south/west) = button 1, B/Y (east/north) = button 2;
- * Start = Start; right trigger held = fast-forward at hud_turbo_speed() (like TAB), left trigger
+ * Start = Start (GG) / Pause (SMS; the HUD instead in games with a side panel, hud_start_opens); right trigger held = fast-forward at hud_turbo_speed() (like TAB), left trigger
  * held = slow motion x0.5. Shoulder buttons: HUD tabs while the HUD is open, else the game's extra
  * buttons (hud_extra_buttons: LB = HUD_EXTRA_1, RB = HUD_EXTRA_2; keyboard C / V). All pads drive P1. */
 static uint8_t g_pad_btn, g_pad_axis;   /* masks from controller buttons / left stick */
@@ -155,7 +155,7 @@ static uint8_t pad_button(Uint8 b){
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return SMS_PAD_RIGHT;
         case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_X: return SMS_PAD_B1;
         case SDL_CONTROLLER_BUTTON_B: case SDL_CONTROLLER_BUTTON_Y: return SMS_PAD_B2;
-        case SDL_CONTROLLER_BUTTON_START:      return SMS_PAD_START;
+        case SDL_CONTROLLER_BUTTON_START:      return hud_start_opens() ? 0 : SMS_PAD_START | SMS_PAD_PAUSE;
         default: return 0;
     }
 }

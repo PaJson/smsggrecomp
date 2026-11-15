@@ -74,13 +74,15 @@ void     glue_set_frame_callback(int (*cb)(const uint32_t *fb, int w, int h));
 void     glue_set_native_output(bool needed);
 
 /* Controller buttons (1 = pressed). The D-pad + two face buttons map to the
- * SMS controller ports $DC/$DD; START is the Game Gear's port-$00 bit-7 button
- * (the SMS Pause button is a separate NMI, not a controller bit). */
+ * SMS controller ports $DC/$DD; START is the Game Gear's port-$00 bit-7 button.
+ * PAUSE is the SMS console's Pause button: not a controller bit on the hardware but
+ * an NMI (vector $0066), raised once when the bit goes from released to pressed
+ * (SMS only; ignored on the Game Gear). */
 enum {
     SMS_PAD_UP    = 0x01, SMS_PAD_DOWN  = 0x02,
     SMS_PAD_LEFT  = 0x04, SMS_PAD_RIGHT = 0x08,
     SMS_PAD_B1    = 0x10, SMS_PAD_B2    = 0x20,
-    SMS_PAD_START = 0x40
+    SMS_PAD_START = 0x40, SMS_PAD_PAUSE = 0x80
 };
 
 /* Set the live controller state for player 1 / 2 (an SMS_PAD_* bitmask). The

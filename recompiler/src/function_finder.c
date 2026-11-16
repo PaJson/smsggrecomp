@@ -317,6 +317,12 @@ static void detect_pager(const TraceResult *tr, uint16_t start){
  * forms so a stale immediate is never mistaken for a live continuation. */
 static bool insn_writes_rp(const Z80Insn *in, int preg){
     uint8_t op = in->opcode;
+    /* A CALL / RST may return anything in any register: a pushed value is never resolved through
+     * one. Golvellius $212B `ld hl,$2149 ; push hl ; ld a,$73 ; call $0E0B ; push hl ; ...` (the
+     * asset loader returns the routine's address in HL): the second push was resolved to $2149, so
+     * `$213D jr $2141` was compiled as a call with continuation $2149 and the jump to the routine
+     * (GAME OVER + password) was dropped. */
+    if (in->cf==Z80_CF_CALL || in->cf==Z80_CF_CALL_COND) return true;
     switch (in->prefix){
     case Z80_PFX_NONE:
         if (op==0xEB) return (preg==1 || preg==2);            /* ex de,hl   */
@@ -470,7 +476,7 @@ static bool push_feeds_call(const TraceResult *t, int i){
  * `ret` resumes at (same contract as a computed call). */
 static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont,
                           uint16_t *tgt_addr, bool *has_tgt);
-static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1);
+static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1, bool *hyp);
 bool trace_ret_jump(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont){
     uint16_t tg; bool ht; return ret_jump_scan(t, ret_addr, cont_addr, has_cont, &tg, &ht);
 }
@@ -531,10 +537,10 @@ static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *con
             fidx[found]=i; fpreg[found]=preg; found++;
         }
     }
-    bool via_df=false;
+    bool via_df=false, df_hyp=false;
     if (found==0){                                    /* not in this block: cross-block dataflow */
         int s0, s1;
-        if (!ret_dataflow(t, ri, &s0, &s1)) return false;
+        if (!ret_dataflow(t, ri, &s0, &s1, &df_hyp)) return false;
         fidx[0]=s0; fpreg[0]=push_reg(&t->insns[s0].insn); found=1;
         if (s1>=0){ fidx[1]=s1; fpreg[1]=push_reg(&t->insns[s1].insn); found=2; }
         via_df=true;
@@ -550,7 +556,29 @@ static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *con
         if (insn_writes_rp(ld, fpreg[0])) break;
         if ((uint16_t)(t->insns[j].addr + ld->length) != t->insns[j+1].addr) break;   /* stay in the block */
     }
-    if (via_df && !*has_tgt) return false;           /* dataflow: constant targets only */
+    /* A non-constant target is fine too (the codegen pops the word and dispatches by address): the
+     * dataflow only claims a RET that every path reaches with this function's own words still on
+     * the stack, which can never be a real return. Golvellius $212B: `ld hl,$2149 ; push hl ;
+     * ld a,$73 ; call $0E0B ; push hl ; ... jr ... ; call $1F33 ; ... ; ret` = jump to the asset
+     * loader's result (bank 7 $82FA, GAME OVER + password), whose RET resumes at $2149; the jr
+     * stops the block-local scan, and before this the RET was a plain return (the Game Over
+     * screen never appeared, `[stack] call at 0x0469`). Not on a path that exists only if a
+     * `push cont ; call F` callee dropped its own return (df_hyp): Golvellius $0FFC `push af ;
+     * push bc ; push de ; call $0F1B` with DE = $0DC0 (a VRAM address, not a continuation) would
+     * make the pad routine's RET at $0DC9 a "jump". */
+    if (via_df && !*has_tgt && df_hyp) return false;
+    /* ... and only when the pushed register gets its value in this function, in the push's own
+     * block (a call, a load, ...). A register the CALLER set is the trampoline contract instead:
+     * Miracle Warriors `ld hl,$8DEF ; jp $9053` with $9053 = `push hl ; ...` is compiled as a call
+     * with continuation $8DEF, so the RET at $90E2 must stay a plain return to it. */
+    if (via_df && !*has_tgt){
+        bool defined=false;
+        for (int j=fidx[0]-1; j>=0; j--){
+            if ((uint16_t)(t->insns[j].addr + t->insns[j].insn.length) != t->insns[j+1].addr) break;
+            if (insn_writes_rp(&t->insns[j].insn, fpreg[0])){ defined=true; break; }
+        }
+        if (!defined) return false;
+    }
     if (via_df && getenv("SMSREC_DF_LOG")){
         static uint32_t seen[4096]; static int nseen;
         uint32_t key = ((uint32_t)t->start << 16) | ret_addr; bool dup=false;
@@ -588,7 +616,7 @@ static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *con
  * instructions reached by different shapes are UNKNOWN. Used only when the backward scan finds
  * nothing, and only for a constant target (`ld rr,nn ; push rr`). */
 #define DF_MAXD 8
-typedef struct { int8_t depth; int16_t site[DF_MAXD]; } DfState;   /* depth -2 unvisited, -1 unknown */
+typedef struct { int8_t depth; uint8_t hyp; int16_t site[DF_MAXD]; } DfState;   /* depth -2 unvisited, -1 unknown; hyp = reached through a push+call "dropped its return" edge */
 static int df_find(const TraceResult *t, uint16_t a){
     int lo=0, hi=t->insn_count-1;                 /* insns are in address order */
     while (lo<=hi){ int m=(lo+hi)/2; uint16_t x=t->insns[m].addr; if (x==a) return m; if (x<a) lo=m+1; else hi=m-1; }
@@ -600,7 +628,7 @@ static bool df_merge(DfState *dst, const DfState *src){
     if (dst->depth==-1) return false;
     bool same = src->depth==dst->depth;
     for (int k=0; same && k<dst->depth; k++) same = src->site[k]==dst->site[k];
-    if (same) return false;
+    if (same){ if (src->hyp && !dst->hyp){ dst->hyp=1; return true; } return false; }
     dst->depth=-1; return true;
 }
 static bool is_pop(const Z80Insn *in){
@@ -608,7 +636,7 @@ static bool is_pop(const Z80Insn *in){
     return (in->prefix==Z80_PFX_DD || in->prefix==Z80_PFX_FD) && in->opcode==0xE1;
 }
 /* -> push-site insn indices on top (site0) and below it (site1, -1 = none) at the RET insns[ri] */
-static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1){
+static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1, bool *hyp){
     static const TraceResult *ck_t; static uint16_t ck_start; static int ck_n = -1, ck_ok, ck_bank; static DfState *ck_st;
     static uint32_t ck_sum;
     if (!t->complete) return false;                   /* during tracing: partial, unsorted */
@@ -619,7 +647,7 @@ static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1){
         DfState *st = (DfState*)realloc(ck_st, sizeof(DfState)*(size_t)(n>0?n:1));
         if (!st) return false;
         ck_st=st; ck_t=t; ck_start=t->start; ck_bank=t->bank; ck_n=n; ck_sum=sum; ck_ok=0;
-        for (int i=0;i<n;i++) st[i].depth=-2;
+        for (int i=0;i<n;i++){ st[i].depth=-2; st[i].hyp=0; }
         int e = df_find(t, t->start);
         if (e<0) return false;
         st[e].depth=0;
@@ -651,7 +679,7 @@ static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1){
                        and RET'd into cont (the word is consumed: go to cont) */
                     ft=true;
                     if (trace_push_call(t, a, &c) && s.depth>=1){
-                        alt=s; alt.depth--; aj=df_find(t, c);
+                        alt=s; alt.depth--; alt.hyp=1; aj=df_find(t, c);
                     }
                     break;
                 case Z80_CF_JUMP:
@@ -680,7 +708,7 @@ static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1){
     if (!ck_ok || ri<0 || ri>=n) return false;
     const DfState *s=&ck_st[ri];
     if (s->depth<1) return false;
-    *site0=s->site[s->depth-1]; *site1 = s->depth>=2 ? s->site[s->depth-2] : -1;
+    *site0=s->site[s->depth-1]; *site1 = s->depth>=2 ? s->site[s->depth-2] : -1; *hyp = s->hyp != 0;
     return true;
 }
 
@@ -1304,6 +1332,18 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
                         !in_blacklist(blacklist,blacklist_count,rt) && bankstate_target(&bs, rt, &rb) &&
                         funclist_find(fl,rt,rb)<0){
                         funclist_add(fl,rt,rb,NULL,FUNC_SRC_JUMP,true);
+                        changed=true;
+                    }
+                    /* its continuation, when the trace does not contain it: the codegen resumes there
+                     * by address (`call_by_address(cont)`), so it must be a function. Only a completed
+                     * trace has the stack dataflow (Golvellius $2148 -> $2149: nothing else in
+                     * func_20FF flows to $2149) */
+                    uint16_t rc; bool hc=false;
+                    if (trace_ret_jump(&tr, tr.insns[k].addr, &rc, &hc) && hc && rc < 0xC000 &&
+                        !insns_have(&tr, rc) &&
+                        !in_blacklist(blacklist,blacklist_count,rc) && bankstate_target(&bs, rc, &rb) &&
+                        funclist_find(fl,rc,rb)<0){
+                        funclist_add(fl,rc,rb,NULL,FUNC_SRC_JUMP,true);
                         changed=true;
                     }
                 }

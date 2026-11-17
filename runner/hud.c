@@ -437,7 +437,21 @@ void hud_draw(uint32_t *fb, int w, int h){
         return;
     }
     if (pg->nopts <= 0){ hud_text(fb, w, h, x0 + 6, y, "NO OPTIONS FOR THIS GAME", GREY); y += 10; }
-    for (int i = 0; i < pg->nopts; i++, y += 10){
+    /* more options than rows: the rows around the selection, cyan triangles at the right edge = more
+       that way (the list scrolls with the cursor) */
+    int avail = (y1 - 14 - y) / 10 - (ninfo ? (ninfo * 10 + 4 + 9) / 10 : 0), first = 0, last = pg->nopts;
+    if (avail < 1) avail = 1;
+    if (pg->nopts > avail){
+        first = pg->sel < 0 ? 0 : pg->sel - avail / 2;
+        if (first > pg->nopts - avail) first = pg->nopts - avail;
+        if (first < 0) first = 0;
+        last = first + avail;
+        for (int i = 0; i < 3; i++){
+            if (first > 0) fill(fb, w, h, x1 - 5 - i, y + 1 + i, x1 - 4 + i, y + 2 + i, CYAN, false);
+            if (last < pg->nopts){ int yb = y + (avail - 1) * 10; fill(fb, w, h, x1 - 5 - i, yb + 5 - i, x1 - 4 + i, yb + 6 - i, CYAN, false); }
+        }
+    }
+    for (int i = first; i < last; i++, y += 10){
         const HudOption *o = &pg->opts[i];
         uint32_t c = (i == pg->sel) ? YEL : WHITE;
         if (i == pg->sel) hud_text(fb, w, h, x0 + 4, y, ">", YEL);

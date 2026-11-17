@@ -1386,6 +1386,9 @@ int glue_add_rom_bank(const uint8_t *bank16k){
     return (int)(g_rom_size / 0x4000) - 1;
 }
 const uint8_t *glue_sram_image(size_t *size){ if (size) *size = sizeof g_sram; return g_sram; }
+void glue_sram_poke(size_t off, uint8_t v){
+    if (off < sizeof g_sram && g_sram[off] != v){ g_sram[off] = v; g_sram_dirty = true; }
+}
 const char    *glue_save_path(void){ return g_sav_path; }
 
 bool glue_load_rom(const char *path){

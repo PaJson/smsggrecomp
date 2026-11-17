@@ -27,6 +27,9 @@ void     glue_sram_flush(void);
  * ("" when saving is off, e.g. SMS_NO_SAVE) - for game hooks that keep data next to the save. */
 const uint8_t *glue_sram_image(size_t *size);
 const char    *glue_save_path(void);
+/* A game hook writes one byte of the cartridge RAM (offset into the 32 KB image), as the game
+ * would: marks the save changed (written by glue_sram_flush, the next unmap, or at exit). */
+void     glue_sram_poke(size_t off, uint8_t v);
 
 /* Initialise bus/VDP/CPU for a fresh run. frame_limit==0 means run forever. */
 void     glue_init(bool is_gg, uint64_t frame_limit);

@@ -317,6 +317,8 @@ int main(int argc, char **argv){
 
     /* In windowed mode, default to run-until-closed unless --frames was given. */
     if (want_window && !frames_set) frames = 0;
+    {   extern bool g_quiet_exit;            /* played, not tested: no end-of-run statistics */
+        g_quiet_exit = want_window && !frames_set && !route && !getenv("SMS_STATS"); }
 
     fprintf(stderr,"[runner] SMS/GG recompiled runner (%s)\n",
             want_window ? "windowed" : "headless");
@@ -430,8 +432,11 @@ int main(int argc, char **argv){
     if (cyc_watch_file) glue_cyc_watch_close();
 #endif
 
-    fprintf(stderr,"[runner] stopped after %llu frames; dispatch misses: %d\n",
-            (unsigned long long)glue_frame_count(), glue_dispatch_miss_count());
+    {   extern bool g_quiet_exit;
+        if (g_quiet_exit) fprintf(stderr,"[runner] game closed after %.1f minutes; dispatch misses: %d\n",
+                                  (double)glue_frame_count() / 3600.0, glue_dispatch_miss_count());
+        else fprintf(stderr,"[runner] stopped after %llu frames; dispatch misses: %d\n",
+                     (unsigned long long)glue_frame_count(), glue_dispatch_miss_count()); }
     bool ok=!coverage_route_failed();
     if (report && !glue_write_report(report))ok=false;
     coverage_route_close();

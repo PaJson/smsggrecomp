@@ -1509,6 +1509,9 @@ void glue_run_interp(void){
             (unsigned long long)g_frame);
 }
 
+/* A game simply played and closed (window, no --frames, no SMS_STATS): the end-of-run statistics
+   ([timing] / [exec] / [mmio]) are for tests; in a terminal they looked like error codes (user report) */
+bool g_quiet_exit;
 void glue_run(void){
     g_running = true;
     if (setjmp(g_quit_env) == 0){
@@ -1526,6 +1529,7 @@ void glue_run(void){
     }
     mb_dump();                           /* bank-alias probe summary (env-gated) */
     g_running = false;
+    if (g_quiet_exit) return;
     fprintf(stderr, "[timing] frames=%llu irq_taken=%llu (reentrant=%llu) "
             "irq/frame=%.2f sync_maxdepth=%d\n",
             (unsigned long long)g_frame, (unsigned long long)g_irq_taken,

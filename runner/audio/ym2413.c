@@ -9,8 +9,20 @@ extern uint16_t g_dbg_pc;
 
 #define OPLL_CLOCK      SMS_Z80_HZ              /* the FM unit shares the Z80 clock */
 #define OPLL_DIVIDER    72                      /* one OPLL sample per 72 clocks */
-#define FM_GAIN_NUM     3                       /* output gain relative to emu2413's scale */
-#define FM_GAIN_DEN     2
+#define FM_GAIN_NUM     15                      /* output gain relative to emu2413's scale: 3.75 */
+#define FM_GAIN_DEN     4                       /* (was 1.5, a guess: 15-20 dB under the PSG; see SN_MASTER_DIV) */
+#define FM_KNEE         24000                   /* soft limiter above this (rare FM peaks, e.g. Phantasy Star) */
+
+/* |x| <= KNEE unchanged, above it bent smoothly towards 32767 (never reached) */
+static inline int32_t soft_limit(int32_t x)
+{
+    int32_t a = x < 0 ? -x : x;
+    if (a <= FM_KNEE) return x;
+    const int32_t room = 32767 - FM_KNEE;
+    int64_t over = a - FM_KNEE;
+    int32_t y = FM_KNEE + (int32_t)(over * room / (over + room));
+    return x < 0 ? -y : y;
+}
 
 static OPLL    *s_opll;
 static uint8_t  s_addr_latch;
@@ -113,8 +125,7 @@ void fm_mix(int16_t *frames, size_t n)
             s = s * FM_GAIN_NUM / FM_GAIN_DEN;
             l += s; r += s;
         }
-        if (l > 32767) l = 32767; else if (l < -32768) l = -32768;
-        if (r > 32767) r = 32767; else if (r < -32768) r = -32768;
+        l = soft_limit(l); r = soft_limit(r);
         frames[i * 2] = (int16_t)l; frames[i * 2 + 1] = (int16_t)r;
     }
 }

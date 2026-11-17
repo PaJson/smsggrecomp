@@ -509,6 +509,19 @@ static void cov_init(void){
     g_cov_path = p; g_cov_on = 1; atexit(cov_write);
 }
 
+/* Test env SMS_RESET_AT=<frame>,...: the SMS console's Reset button (port $DD bit 4, active low)
+ * held for 10 frames from each listed frame. A game polls it itself (no CPU reset). */
+static bool reset_held(void){
+    static int n = -1; static uint64_t at[16];
+    if (n < 0){
+        n = 0;
+        const char *e = getenv("SMS_RESET_AT");
+        while (e && *e && n < 16){ at[n++] = strtoull(e, (char **)&e, 10); while (*e == ',') e++; }
+    }
+    for (int i = 0; i < n; i++) if (g_frame >= at[i] && g_frame < at[i] + 10) return true;
+    return false;
+}
+
 uint8_t sms_io_in(uint8_t p){
     g_io_in_count[p]++;
     if (p < 0x40){                                       /* control / GG system ports */
@@ -536,7 +549,8 @@ uint8_t sms_io_in(uint8_t p){
         if (g_pad2 & SMS_PAD_RIGHT) b &= (uint8_t)~0x02;
         if (g_pad2 & SMS_PAD_B1)    b &= (uint8_t)~0x04;
         if (g_pad2 & SMS_PAD_B2)    b &= (uint8_t)~0x08;
-        return b;                                        /* bit4 reset, bit6/7 TH: not pressed */
+        if (reset_held()) b &= (uint8_t)~0x10;           /* the console's Reset button (test env) */
+        return b;                                        /* bit6/7 TH: not pressed */
     } else {
         uint8_t b = 0xFF;                                /* $DC */
         if (g_pad1 & SMS_PAD_UP)    b &= (uint8_t)~0x01;

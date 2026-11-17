@@ -6,7 +6,8 @@
  * pauses the emulation while the HUD is open. Open/close: F1 (keyboard); gamepad: Start on SMS games
  * (the SMS Pause button is not emulated), Back/Select on Game Gear games (Start is the game's);
  * Back toggles the side panel in games that have one (as F2 does), otherwise it opens the HUD.
- * Inside: Up/Down select, Left/Right change, Esc/Z/F1 (pad: A/Start) close, Enter/Space/X (pad: B) confirm
+ * Inside: Up/Down select, Left/Right change, Esc/X/F1 (pad: B/Start) close, Enter/Space/Z (pad: A) confirm
+ * (A / Z = the SMS button 1 = confirm, B / X = button 2 = back, as in the games)
  * (pages that do not use it: close); pages: Left/Right
  * on the tab row, Q/E or PgUp/PgDn (pad: LB/RB).
  *

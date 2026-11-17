@@ -728,6 +728,9 @@ static void emit_cf(FILE *o, const Z80Insn *in, uint16_t addr){
                     fprintf(o,"        { uint16_t _t = sms_read16(s->sp); s->sp = (uint16_t)(s->sp + 2); uint16_t _csp = (uint16_t)(s->sp + 2); call_by_address(_t); if ((int16_t)(s->sp - _csp) > 0) return; if (s->sp != _csp) sms_call_unbalanced(0x%04X); goto L_%04X; }\n", addr, rcont);
                 else if (rhas)   /* continuation is a separate function entry: resume there by address */
                     fprintf(o,"        { uint16_t _t = sms_read16(s->sp); s->sp = (uint16_t)(s->sp + 2); uint16_t _csp = (uint16_t)(s->sp + 2); call_by_address(_t); if ((int16_t)(s->sp - _csp) > 0) return; if (s->sp != _csp) sms_call_unbalanced(0x%04X); call_by_address(0x%04X); return; }\n", addr, rcont);
+                else if (trace_ret_jump_target(G_TR, addr, &rcont) && tr_has(rcont))
+                    /* constant target = a label of this function (stack dataflow, Miracle Warriors $90E2 -> $9066) */
+                    fprintf(o,"        s->sp = (uint16_t)(s->sp + 2); goto L_%04X;\n", rcont);
                 else
                     fprintf(o,"        { uint16_t _t = sms_read16(s->sp); s->sp = (uint16_t)(s->sp + 2); call_by_address(_t); return; }\n");
                 break;
@@ -746,6 +749,8 @@ static void emit_cf(FILE *o, const Z80Insn *in, uint16_t addr){
                     fprintf(o," uint16_t _csp = (uint16_t)(s->sp + 2); call_by_address(_t); if ((int16_t)(s->sp - _csp) > 0) return; if (s->sp != _csp) sms_call_unbalanced(0x%04X); goto L_%04X; }\n", addr, rcont);
                 else if (rhas)
                     fprintf(o," uint16_t _csp = (uint16_t)(s->sp + 2); call_by_address(_t); if ((int16_t)(s->sp - _csp) > 0) return; if (s->sp != _csp) sms_call_unbalanced(0x%04X); call_by_address(0x%04X); return; }\n", addr, rcont);
+                else if (trace_ret_jump_target(G_TR, addr, &rcont) && tr_has(rcont))
+                    fprintf(o," goto L_%04X; }\n", rcont);
                 else
                     fprintf(o," call_by_address(_t); return; }\n");
                 break;
@@ -795,6 +800,11 @@ static void emit_cf(FILE *o, const Z80Insn *in, uint16_t addr){
                      * normal return leaves SP exactly where it is now. */
                     char callbuf[128]; format_native_call(callbuf, sizeof callbuf, in->target);
                     fprintf(o,"        { uint16_t _csp = s->sp; %s if ((int16_t)(s->sp - _csp) > 0) return; if (s->sp != _csp) sms_call_unbalanced(0x%04X); goto L_%04X; }\n", callbuf, addr, jcont);
+                } else if (G_TR && trace_tail_jump_cont(G_TR, addr, &jcont)){
+                    /* own continuation pushed in another block (stack dataflow): call T, resume there */
+                    char callbuf[128]; format_native_call(callbuf, sizeof callbuf, in->target);
+                    if (tr_has(jcont)) fprintf(o,"        { uint16_t _csp = (uint16_t)(s->sp + 2); %s if ((int16_t)(s->sp - _csp) > 0) return; if (s->sp != _csp) sms_call_unbalanced(0x%04X); goto L_%04X; }\n", callbuf, addr, jcont);
+                    else fprintf(o,"        { uint16_t _csp = (uint16_t)(s->sp + 2); %s if ((int16_t)(s->sp - _csp) > 0) return; if (s->sp != _csp) sms_call_unbalanced(0x%04X); call_by_address(0x%04X); return; }\n", callbuf, addr, jcont);
                 } else emit_jump_target(o, in->target, NULL, 0);
             }
             break;
@@ -816,6 +826,13 @@ static void emit_cf(FILE *o, const Z80Insn *in, uint16_t addr){
                 fprintf(o,"        if (%s) { ", cx);
                 if (cextra) fprintf(o,"s->cyc += %d; ", cextra);
                 fprintf(o,"uint16_t _csp = (uint16_t)(s->sp + 2); %s if ((int16_t)(s->sp - _csp) > 0) return; if (s->sp != _csp) sms_call_unbalanced(0x%04X); goto L_%04X; }\n", callbuf, addr, jc);
+            } else if (in->has_target && G_TR && trace_tail_jump_cont(G_TR, addr, &jc)){
+                /* own continuation pushed in another block (stack dataflow): when taken, call T */
+                char callbuf[128]; format_native_call(callbuf, sizeof callbuf, in->target);
+                fprintf(o,"        if (%s) { ", cx);
+                if (cextra) fprintf(o,"s->cyc += %d; ", cextra);
+                if (tr_has(jc)) fprintf(o,"uint16_t _csp = (uint16_t)(s->sp + 2); %s if ((int16_t)(s->sp - _csp) > 0) return; if (s->sp != _csp) sms_call_unbalanced(0x%04X); goto L_%04X; }\n", callbuf, addr, jc);
+                else fprintf(o,"uint16_t _csp = (uint16_t)(s->sp + 2); %s if ((int16_t)(s->sp - _csp) > 0) return; if (s->sp != _csp) sms_call_unbalanced(0x%04X); call_by_address(0x%04X); return; }\n", callbuf, addr, jc);
             } else
                 emit_jump_target(o, in->target, cx, cextra);
             break; }
@@ -879,10 +896,12 @@ static void emit_function(FILE *o, const SmsRom *rom, const FuncEntry *fe,
         uint16_t lt; bool have=false;
         if (in->cf==Z80_CF_JUMP && in->has_target && (trace_computed_call(&tr, tr.insns[k].addr, &lt) || trace_trampoline_call(&tr, tr.insns[k].addr, &lt)) && tr_has(lt)) have=true;   /* push-cont / trampoline + jp T: continuation label */
         else if (in->cf==Z80_CF_JUMP_COND && in->has_target && !tr_has(in->target) && trace_computed_call(&tr, tr.insns[k].addr, &lt) && tr_has(lt)) have=true;   /* push-cont + jp cc,T (external): continuation label */
+        else if ((in->cf==Z80_CF_JUMP || in->cf==Z80_CF_JUMP_COND) && in->has_target && !tr_has(in->target) && trace_tail_jump_cont(&tr, tr.insns[k].addr, &lt)) have=true;   /* own continuation (dataflow) */
         else if ((in->cf==Z80_CF_JUMP || in->cf==Z80_CF_JUMP_COND) && in->has_target){ lt=in->target; have=true; }
         else if (in->cf==Z80_CF_JUMP && !in->has_target && in->opcode==0xE9 &&
                  trace_computed_call(&tr, tr.insns[k].addr, &lt)) have=true;   /* computed-call continuation */
-        else if (in->cf==Z80_CF_RET || in->cf==Z80_CF_RET_COND){ bool hc=false; if (trace_ret_jump(&tr, tr.insns[k].addr, &lt, &hc) && hc) have=true; }   /* push cont + push target + ret */
+        else if (in->cf==Z80_CF_RET || in->cf==Z80_CF_RET_COND){ bool hc=false; if (trace_ret_jump(&tr, tr.insns[k].addr, &lt, &hc) && hc) have=true;   /* push cont + push target + ret */
+            else if (trace_ret_jump_target(&tr, tr.insns[k].addr, &lt)) have=true; }   /* constant target in this function: goto */
         else if ((in->cf==Z80_CF_CALL || in->cf==Z80_CF_CALL_COND) && in->has_target && trace_push_call(&tr, tr.insns[k].addr, &lt)) have=true;   /* push cont + call F (F pops its own return) */
         if (have && tr_has(lt)){
             bool seen=false; for (int j=0;j<nlbl;j++) if (lbl[j]==lt){ seen=true; break; }

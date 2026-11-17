@@ -482,6 +482,8 @@ static bool push_feeds_call(const TraceResult *t, int i){
 static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont,
                           uint16_t *tgt_addr, bool *has_tgt);
 static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1, bool *hyp);
+static bool g_df_cc;           /* the last ret_dataflow claim came through a `push cont ; jp cc,T` edge */
+static bool g_rj_cc;           /* ... and the last ret_jump_scan used such a claim */
 bool trace_ret_jump(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont){
     uint16_t tg; bool ht; return ret_jump_scan(t, ret_addr, cont_addr, has_cont, &tg, &ht);
 }
@@ -497,6 +499,13 @@ bool trace_ret_jump_push(const TraceResult *t, uint16_t ret_addr, uint16_t *push
 bool trace_ret_jump_target(const TraceResult *t, uint16_t ret_addr, uint16_t *tgt_addr){
     uint16_t c; bool hc, ht=false;
     return ret_jump_scan(t, ret_addr, &c, &hc, tgt_addr, &ht) && ht;
+}
+/* for discovery: a target to register as a function entry. Not one that is inside this trace when
+ * the claim came through a `push cont ; jp cc,T` edge (see ret_dataflow): there the codegen jumps
+ * to the label, and the edge may become a call later */
+bool trace_ret_jump_target_reg(const TraceResult *t, uint16_t ret_addr, uint16_t *tgt_addr){
+    if (!trace_ret_jump_target(t, ret_addr, tgt_addr)) return false;
+    return !(g_rj_cc && insns_have((TraceResult*)t, *tgt_addr));
 }
 static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr, bool *has_cont,
                           uint16_t *tgt_addr, bool *has_tgt){
@@ -543,9 +552,11 @@ static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *con
         }
     }
     bool via_df=false, df_hyp=false;
+    g_rj_cc=false;
     if (found==0){                                    /* not in this block: cross-block dataflow */
         int s0, s1;
         if (!ret_dataflow(t, ri, &s0, &s1, &df_hyp)) return false;
+        g_rj_cc=g_df_cc;
         fidx[0]=s0; fpreg[0]=push_reg(&t->insns[s0].insn); found=1;
         if (s1>=0){ fidx[1]=s1; fpreg[1]=push_reg(&t->insns[s1].insn); found=2; }
         via_df=true;
@@ -621,7 +632,7 @@ static bool ret_jump_scan(const TraceResult *t, uint16_t ret_addr, uint16_t *con
  * instructions reached by different shapes are UNKNOWN. Used only when the backward scan finds
  * nothing, and only for a constant target (`ld rr,nn ; push rr`). */
 #define DF_MAXD 8
-typedef struct { int8_t depth; uint8_t hyp; int16_t site[DF_MAXD]; } DfState;   /* depth -2 unvisited, -1 unknown; hyp = reached through a push+call "dropped its return" edge */
+typedef struct { int8_t depth; uint8_t hyp, cc; int16_t site[DF_MAXD]; } DfState;   /* depth -2 unvisited, -1 unknown; hyp = reached through a push+call "dropped its return" edge; cc = through a `push cont ; jp cc,T` edge into T */
 static int df_find(const TraceResult *t, uint16_t a){
     int lo=0, hi=t->insn_count-1;                 /* insns are in address order */
     while (lo<=hi){ int m=(lo+hi)/2; uint16_t x=t->insns[m].addr; if (x==a) return m; if (x<a) lo=m+1; else hi=m-1; }
@@ -633,7 +644,7 @@ static bool df_merge(DfState *dst, const DfState *src){
     if (dst->depth==-1) return false;
     bool same = src->depth==dst->depth;
     for (int k=0; same && k<dst->depth; k++) same = src->site[k]==dst->site[k];
-    if (same){ if (src->hyp && !dst->hyp){ dst->hyp=1; return true; } return false; }
+    if (same){ bool ch=false; if (src->hyp && !dst->hyp){ dst->hyp=1; ch=true; } if (src->cc && !dst->cc){ dst->cc=1; ch=true; } return ch; }
     dst->depth=-1; return true;
 }
 static bool is_pop(const Z80Insn *in){
@@ -652,7 +663,7 @@ static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1, b
         DfState *st = (DfState*)realloc(ck_st, sizeof(DfState)*(size_t)(n>0?n:1));
         if (!st) return false;
         ck_st=st; ck_t=t; ck_start=t->start; ck_bank=t->bank; ck_n=n; ck_sum=sum; ck_ok=0;
-        for (int i=0;i<n;i++){ st[i].depth=-2; st[i].hyp=0; }
+        for (int i=0;i<n;i++){ st[i].depth=-2; st[i].hyp=0; st[i].cc=0; }
         int e = df_find(t, t->start);
         if (e<0) return false;
         st[e].depth=0;
@@ -691,8 +702,19 @@ static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1, b
                     if (in->has_target && !trace_computed_call(t, a, &c) && !trace_trampoline_call(t, a, &c)) tj=df_find(t, in->target);
                     break;
                 case Z80_CF_JUMP_COND:
+                    /* the codegen treats `push cont ; ... ; jp cc,T` as a call only when T is outside
+                       this function; to a label of this function it is a plain goto, so the pushed
+                       word goes along (Miracle Warriors $9056 `jp c,$90D9` after `ld hl,$9066 ;
+                       push hl`: the $90D9 path ends in RETs / tail jumps that resume at $9066) */
                     ft=true;
-                    if (in->has_target && !trace_computed_call(t, a, &c)) tj=df_find(t, in->target);
+                    if (in->has_target){
+                        tj=df_find(t, in->target);
+                        /* a `push cont ; jp cc,T` that is a call once T becomes a function entry:
+                           claims made along this edge must not register new entries (PS AGES En
+                           bank 32 $85F0 `jp nz,$8748`: $8748 is still inside the trace during
+                           discovery, its RET "jumps" to the continuation $85F6) */
+                        if (tj>=0 && trace_computed_call(t, a, &c)){ alt=s; alt.cc=1; aj=tj; tj=-1; }
+                    }
                     break;
                 default: break;
                 }
@@ -714,7 +736,39 @@ static bool ret_dataflow(const TraceResult *t, int ri, int *site0, int *site1, b
     const DfState *s=&ck_st[ri];
     if (s->depth<1) return false;
     *site0=s->site[s->depth-1]; *site1 = s->depth>=2 ? s->site[s->depth-2] : -1; *hyp = s->hyp != 0;
+    g_df_cc = s->cc != 0;
     return true;
+}
+
+/* A jump (jp / jp cc) to ANOTHER function while this function's own constant continuation is on
+ * the stack (`ld rr,cont ; push rr ; ...` in other blocks, found by the stack dataflow): the callee's
+ * RET resumes at cont, so it is a call with continuation, not a tail jump. Miracle Warriors' sound
+ * driver $8F60: `ld hl,$9066 ; push hl ; sub $F0 ; jp c,$90D9` and the $90D9 path ends in
+ * `jp $947D` (PSG) / `jp $8EEA` (FM), whose RETs go to $9066 (the command loop). As a tail jump the
+ * whole function returned to its caller with SP 2 too low (`[stack] call at 0x9380`, user report:
+ * sound $9F after a battle). The same run-time contract as `push cont ; jp T`. */
+bool trace_tail_jump_cont(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr){
+    int ri=df_find(t, jp_addr);
+    if (ri<0) return false;
+    const Z80Insn *in=&t->insns[ri].insn;
+    if (!(in->cf==Z80_CF_JUMP || in->cf==Z80_CF_JUMP_COND) || !in->has_target) return false;
+    if (df_find(t, in->target)>=0) return false;      /* a goto inside this function */
+    uint16_t c;
+    if (trace_computed_call(t, jp_addr, &c) || trace_trampoline_call(t, jp_addr, &c)) return false;
+    int s0, s1; bool hyp=false;
+    if (!ret_dataflow(t, ri, &s0, &s1, &hyp) || hyp) return false;
+    int preg=push_reg(&t->insns[s0].insn);
+    for (int j=s0-1; j>=0; j--){                      /* the pushed value: a constant load in the push's block */
+        const Z80Insn *ld=&t->insns[j].insn;
+        int lr = (ld->prefix==Z80_PFX_NONE)
+               ? (ld->opcode==0x01?0:ld->opcode==0x11?1:ld->opcode==0x21?2:-1)
+               : (((ld->prefix==Z80_PFX_DD||ld->prefix==Z80_PFX_FD)&&ld->opcode==0x21)
+                   ?(ld->prefix==Z80_PFX_DD?4:5):-1);
+        if (lr==preg && ld->imm_bits==16){ *cont_addr=ld->imm; return *cont_addr < 0xC000; }
+        if (insn_writes_rp(ld, preg)) return false;
+        if ((uint16_t)(t->insns[j].addr + ld->length) != t->insns[j+1].addr) return false;
+    }
+    return false;
 }
 
 bool trace_trampoline_call(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr){
@@ -1333,7 +1387,7 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
                 }
                 if (in->cf==Z80_CF_RET || in->cf==Z80_CF_RET_COND){
                     uint16_t rt; int rb;
-                    if (trace_ret_jump_target(&tr, tr.insns[k].addr, &rt) && rt < 0xC000 &&
+                    if (trace_ret_jump_target_reg(&tr, tr.insns[k].addr, &rt) && rt < 0xC000 &&
                         !in_blacklist(blacklist,blacklist_count,rt) && bankstate_target(&bs, rt, &rb) &&
                         funclist_find(fl,rt,rb)<0){
                         funclist_add(fl,rt,rb,NULL,FUNC_SRC_JUMP,true);

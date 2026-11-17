@@ -115,8 +115,14 @@ bool trace_ret_jump(const TraceResult *t, uint16_t ret_addr, uint16_t *cont_addr
 /* The pushed target of such a RET when it is a constant (`ld rr,nn16 ; push rr`); discovery
  * registers it as a function entry. */
 bool trace_ret_jump_target(const TraceResult *t, uint16_t ret_addr, uint16_t *tgt_addr);
+/* the same for discovery (entries to register): see function_finder.c */
+bool trace_ret_jump_target_reg(const TraceResult *t, uint16_t ret_addr, uint16_t *tgt_addr);
 /* Address of the `push` of the jump target (to detect a path-dependent push, see code_generator). */
 bool trace_ret_jump_push(const TraceResult *t, uint16_t ret_addr, uint16_t *push_addr);
+
+/* jp / jp cc to another function while this function's own constant continuation (pushed in
+ * another block) is on the stack: a call whose RET resumes at *cont_addr (stack dataflow). */
+bool trace_tail_jump_cont(const TraceResult *t, uint16_t jp_addr, uint16_t *cont_addr);
 
 /* `ld rr,cont ; push rr ; call F` where F drops its own return address (`pop hl ; ret`) so
  * its RET resumes at `cont` (Phantasy Star LABEL_787B). After the call, SP == pre-call SP + 2

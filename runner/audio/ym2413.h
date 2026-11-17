@@ -22,4 +22,9 @@ void    fm_mix(int16_t *frames, size_t n);
 /* Per-channel output gain, 0..256 (256 = unchanged): ch 0..8 melodic, 9..13 rhythm (BD, HH, SD,
  * TOM, CYM). Host-side mixing (volume options), not chip state. */
 void    fm_set_channel_gain(unsigned ch, unsigned gain);
+/* Is the FM unit plugged in? Default no (Western console: games play their PSG sound); test env
+ * SMS_FM=1 = yes. Unplugged: $F0-$F2 writes are ignored, $F2 reads $FF (the game's detection fails),
+ * no FM output. Changing it resets the chip; the game's driver has to be switched with it. */
+void    fm_set_attached(int on);
+int     fm_attached(void);
 #endif

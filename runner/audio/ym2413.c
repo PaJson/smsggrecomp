@@ -19,7 +19,16 @@ static uint32_t s_phase;                        /* Z80 clocks since the newest O
 static int32_t  s_prev, s_cur;
 static unsigned s_gain[14] = { 256, 256, 256, 256, 256, 256, 256, 256, 256, 256, 256, 256, 256, 256 };
 static int      s_gain_set;                     /* any gain != 256: mix per channel (OPLL_calcStereo) */
+static int      s_attached = -1;                /* FM unit plugged in (-1 = not decided yet: env SMS_FM) */
 
+/* No FM unit by default: Western consoles have none, so games detect none and play the PSG (their
+   original sound). A game option attaches it (fm_set_attached) before the game's boot code detects
+   it, or live together with the game's own driver switch. Test env SMS_FM=1 = attached from start. */
+static int attached(void)
+{
+    if (s_attached < 0) { const char *e = getenv("SMS_FM"); s_attached = e && e[0] == '1'; }
+    return s_attached;
+}
 static void apply_gains(void)
 {
     s_gain_set = 0;
@@ -28,6 +37,16 @@ static void apply_gains(void)
         if (s_opll) OPLL_setPanFine(s_opll, i, g);
         if (s_gain[i] != 256) s_gain_set = 1;
     }
+}
+
+int fm_attached(void) { return attached(); }
+void fm_set_attached(int on)
+{
+    on = on != 0;
+    if (attached() == on) return;
+    s_attached = on;
+    if (s_opll) OPLL_reset(s_opll), apply_gains();   /* plugged / unplugged: a silent chip */
+    s_addr_latch = 0; s_ctrl = 0; s_phase = 0; s_prev = s_cur = 0;
 }
 
 void fm_set_channel_gain(unsigned ch, unsigned gain)
@@ -51,6 +70,7 @@ void fm_reset(void)
 
 void fm_port_write(uint8_t port, uint8_t value)
 {
+    if (!attached()) return;                    /* no unit: the write goes nowhere */
     if (!s_opll) fm_reset();
     if (!s_opll) return;
     {   /* diagnostic: SMS_FMLOG=<file> logs every FM register write (reg=value) */
@@ -69,12 +89,13 @@ void fm_port_write(uint8_t port, uint8_t value)
 uint8_t fm_port_read(uint8_t port)
 {
     (void)port;
+    if (!attached()) return 0xFF;               /* no unit: $F2 never reads back what was written */
     return s_ctrl;                              /* detection: the unit reads back what was written */
 }
 
 void fm_mix(int16_t *frames, size_t n)
 {
-    if (!s_opll) return;
+    if (!s_opll || !attached()) return;
     const int psg_off = (s_ctrl & 2) != 0;
     const int fm_on   = (s_ctrl & 1) != 0;
     for (size_t i = 0; i < n; i++) {

@@ -271,6 +271,7 @@ static void detect_pager(const TraceResult *tr, uint16_t start){
     bool is_const=false; int cval=0, delta=0;        /* A = is_const? cval : (incoming+delta) */
     struct { int slot; PagerMode mode; int val; } eff[3]; int neff=0;
     bool reached_ret = false;     /* a pager's writes are only its effect if it then simply returns */
+    bool unknown = false;         /* A was overwritten by something unmodelled (until a constant load) */
     for (int guard=0; guard<32; guard++){
         const Z80Insn *in = tr_insn_at(tr, a);
         if (!in || in->prefix!=Z80_PFX_NONE) break;
@@ -278,6 +279,7 @@ static void detect_pager(const TraceResult *tr, uint16_t start){
         if (in->cf == Z80_CF_RET){ reached_ret = true; break; }
         if (op==0x32){                                       /* ld (nn),a (A preserved) */
             int slot = in->imm==0xFFFD?0 : in->imm==0xFFFE?1 : in->imm==0xFFFF?2 : -1;
+            if (slot>=0 && unknown) { neff = 0; break; }     /* a mapper write of an unknown value: no pager */
             if (slot>=0 && neff<3){
                 eff[neff].slot=slot;
                 eff[neff].mode=is_const?PG_CONST:PG_AFFINE;
@@ -285,14 +287,17 @@ static void detect_pager(const TraceResult *tr, uint16_t start){
                 neff++;
             }
         }
-        else if (op==0x3E){ is_const=true; cval=(uint8_t)in->imm; }   /* ld a,n   */
+        else if (op==0x3E){ is_const=true; cval=(uint8_t)in->imm; unknown=false; }   /* ld a,n   */
         else if (op==0x3C){ if(is_const)cval++; else delta++; }       /* inc a    */
         else if (op==0x3D){ if(is_const)cval--; else delta--; }       /* dec a    */
-        else if (op==0xAF||op==0x97){ is_const=true; cval=0; }        /* xor a / sub a */
+        else if (op==0xAF||op==0x97){ is_const=true; cval=0; unknown=false; }        /* xor a / sub a */
         else if (op==0xA7||op==0xB7){ /* and a / or a: A value unchanged */ }
         else {
-            if (insn_clobbers_a(in)) break;                  /* A unmodelable from here */
             if (in->cf != Z80_CF_NONE) break;                /* left the fall-through path */
+            /* A overwritten by something not modelled (ld a,(nn) / ld a,r / pop af ...): unknown until a
+               constant load. Golvellius Plus `Enter16: ld a,($FFFF) ; ld (SavedBank),a ; ld a,16 ;
+               ld ($FFFF),a ; ret` saves the bank, then maps a constant one: a pager for bank 16. */
+            if (insn_clobbers_a(in)) { unknown = true; is_const = false; delta = 0; }
         }
         a = (uint16_t)(a + in->length);
     }

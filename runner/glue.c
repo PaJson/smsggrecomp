@@ -1073,6 +1073,16 @@ static void hybrid_interpret(uint16_t addr){
      * saved registers - lifting sp above entry_sp - without a premature stop; its
      * own final RET is the real exit. The old sp-only test bailed at that POP and
      * left iff1=0, freezing the title sequence. */
+    /* Each open frame remembers WHERE its return address was stored (SP after the push). A routine
+     * that drops its own return address (`pop hl ; jp ...`) leaves its frame open, so a count alone
+     * stays one too high and the routine's final RET passes for an internal return: the interpreter
+     * then ran on into the caller (found 2026-11-18: PS Rev A with the borrowed Japanese sound driver,
+     * called from the frame interrupt, ran through the interrupt epilogue, EI, into the main program;
+     * the hook then cleared IFF again and the game hung in WaitForVInt). A RET pops the word at its SP:
+     * every open frame stored BELOW that word was abandoned and is closed first; a frame stored exactly
+     * there is the normal return; a RET below every open frame is a push-continuation return. */
+    enum { HYB_FRAMES = 256 };
+    uint16_t frame_at[HYB_FRAMES];
     int depth = 0;
     for (;;){
         bool took_int = false;
@@ -1093,11 +1103,14 @@ static void hybrid_interpret(uint16_t addr){
         advance_vdp(base + g_hz.cyc);
         g_sync_deadline = g_next_line_cyc;
         int dsp = (int16_t)(g_hz.sp - sp0);
-        if (took_int){ if (dsp == -2) depth++; }          /* interrupt pushed PC      */
-        else if (cls > 0 && dsp == -2) depth++;           /* taken CALL/RST           */
-        else if (cls < 0 && dsp ==  2){                   /* taken RET/RETI/RETN      */
-            if (depth > 0) depth--;
-            else if (g_hz.sp > entry_sp) break;           /* returned to entry caller */
+        if ((took_int || cls > 0) && dsp == -2){          /* interrupt / taken CALL/RST pushed PC */
+            if (depth < HYB_FRAMES) frame_at[depth] = g_hz.sp;
+            depth++;
+        }
+        else if (cls < 0 && dsp ==  2){                   /* taken RET/RETI/RETN popped the word at sp0 */
+            while (depth > 0 && depth <= HYB_FRAMES && frame_at[depth-1] < sp0) depth--;   /* abandoned frames */
+            if (depth > HYB_FRAMES || (depth > 0 && frame_at[depth-1] == sp0)) depth--;    /* normal return */
+            else if (depth == 0 && g_hz.sp > entry_sp) break;   /* returned to entry caller */
             /* else: push;jp(hl) continuation return -> keep interpreting */
         }
         if (++guard >= guard_max){

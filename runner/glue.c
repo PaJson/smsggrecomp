@@ -21,10 +21,10 @@
 #include "png_write.h"
 #include "audio/sn76489.h"
 #include "audio/ym2413.h"
+#include "hud.h"         /* generic runner modules: also in builds without a game (tests/bus_selftest.c) */
+#include "safe_file.h"
 #ifdef SMSGG_HAVE_GAME_LAYOUT
 #include "game_spec.h"
-#include "hud.h"
-#include "safe_file.h"
 #endif
 
 #include <stdio.h>

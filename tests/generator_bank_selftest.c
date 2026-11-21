@@ -44,6 +44,7 @@ void sms_dispatch_miss(uint16_t address){if(address!=0x8000)abort();misses++;g_z
 void sms_diff_enter(uint16_t address){(void)address;abort();}
 void sms_diff_abort(void){abort();}
 void sms_sync(void){abort();}
+void sms_call_unbalanced(uint16_t at){fprintf(stderr,"call at 0x%04X returned unbalanced\n",at);abort();}
 int main(void){
     bank=2;call_by_address(0x8000);
     if(misses!=1||g_z80.a!=0x22){fputs("wrong-bank compiled code executed\n",stderr);return 1;}

@@ -1407,9 +1407,12 @@ void ff_discover(const SmsRom *rom, FuncList *fl,
                     }
                 }
                 bool is_call = (in->cf==Z80_CF_CALL || in->cf==Z80_CF_CALL_COND);
+                /* only the `visible` entries ff_visible_entries wrote: the rest of the array holds
+                 * stale addresses from other functions / uninitialised memory (made the order of
+                 * discovery depend on the memory layout: PS AGES En $801F_b32) */
                 bool is_tailjump = (in->cf==Z80_CF_JUMP && in->has_target &&
                                     !trace_is_label(&tr,in->target) &&
-                                    !is_entry_addr(entries,n,in->target));
+                                    !is_entry_addr(entries,visible,in->target));
                 /* `jp cc,T` across a 16 KB mapper slot is emitted as an external call_by_address
                  * (trace_function never treats it as intra-function), so T must become a function. */
                 bool is_condtail = (in->cf==Z80_CF_JUMP_COND && in->has_target &&

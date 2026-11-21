@@ -24,6 +24,9 @@ uint64_t g_sync_deadline,g_frame_ic,g_diff_icount;
 int g_diff_freeze,g_diff_active;
 uint16_t g_dbg_pc,g_enter_ring[SMS_ENTER_RING_SIZE];
 uint32_t g_enter_pos;
+int g_cov_on;                                  /* coverage recording stays off */
+void sms_cov_hit(uint16_t a){(void)a;}
+void sms_call_unbalanced(uint16_t at){fprintf(stderr,"call at 0x%04X returned unbalanced\n",at);abort();}
 typedef struct { Z80State state;uint16_t pc; } Event;
 static Event events[2][256];static unsigned count[2],arm;
 int sms_slot_bank(uint16_t a){(void)a;return 3;}

@@ -10,6 +10,8 @@ uint64_t g_sync_deadline,g_frame_ic,g_diff_icount;
 int g_diff_freeze,g_diff_active;
 uint16_t g_dbg_pc,g_enter_ring[SMS_ENTER_RING_SIZE];
 uint32_t g_enter_pos;
+int g_cov_on;                                  /* coverage recording stays off */
+void sms_cov_hit(uint16_t a){(void)a;}
 typedef struct { uint64_t cyc;uint16_t pc;uint8_t ei,r; } Event;
 static Event events[2][20000];static unsigned counts[2],arm;
 void sms_sync(void){

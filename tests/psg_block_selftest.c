@@ -15,6 +15,8 @@
 #define psg_dump_state_text reference_psg_dump_state_text
 #define psg_save_state reference_psg_save_state
 #define psg_load_state reference_psg_load_state
+#define psg_set_channel_gain reference_psg_set_channel_gain
+#define psg_set_aux_mixer reference_psg_set_aux_mixer
 #include "../runner/audio/sn76489.c"
 #else
 #include "sn76489.h"

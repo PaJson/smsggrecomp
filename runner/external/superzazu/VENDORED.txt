@@ -1,1 +1,8 @@
 superzazu/z80 vendored from https://github.com/superzazu/z80 @ d64fe10a2274e5e40019b1086bf7d8990cbc5f23
+
+Local changes to z80.c (z80.h and LICENSE are unchanged):
+- INI / IND / OUTI / OUTD (and the repeating forms) set every flag as the hardware does
+  (S, Z, H, P/V, N, C, X, Y from the transferred value; upstream sets only Z and N); IND / OUTD
+  no longer call INI / OUTI and then undo the step (commit 71f869a).
+- LD A,R returns sms_test_r(R) (runner/glue.c): the real R unless the test env SMS_FIXED_R is set
+  (commit e94c4b3).

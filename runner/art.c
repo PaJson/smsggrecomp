@@ -57,7 +57,7 @@ bool art_title_matches(const char *name, const char *title)
 
 static bool is_dir(const char *p) { struct stat st; return stat(p, &st) == 0 && (st.st_mode & S_IFDIR); }
 
-bool art_find(const char *dir, const char *name, const char *kind, char *out, size_t n)
+static bool find_in(const char *dir, const char *name, const char *kind, char *out, size_t n)
 {
     if (!dir || !name || !name[0]) return false;
     DIR *d = opendir(dir);
@@ -78,6 +78,23 @@ bool art_find(const char *dir, const char *name, const char *kind, char *out, si
     }
     closedir(d);
     return best > 0;
+}
+
+/* Images/<title> (front).jpg ... or in a platform subfolder: Images/sms/<title> (front).jpg (one level) */
+bool art_find(const char *dir, const char *name, const char *kind, char *out, size_t n)
+{
+    if (find_in(dir, name, kind, out, n)) return true;
+    if (!dir || !name || !name[0]) return false;
+    DIR *d = opendir(dir);
+    if (!d) return false;
+    struct dirent *e; bool ok = false;
+    while (!ok && (e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char sub[1100]; snprintf(sub, sizeof sub, "%s/%s", dir, e->d_name);
+        if (is_dir(sub)) ok = find_in(sub, name, kind, out, n);
+    }
+    closedir(d);
+    return ok;
 }
 
 bool art_images_dir(const char *start, char *out, size_t n)

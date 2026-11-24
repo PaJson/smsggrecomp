@@ -304,7 +304,11 @@ int main(int argc, char **argv){
     const char *psg_log = NULL;     /* chip_ring: (cyc,val) PSG-write log */
     bool want_window = false;
     int  win_scale = 3;
+#ifdef SMSGG_HAVE_GAME_LAYOUT
     bool interp = false;       /* oracle: run the reference superzazu interpreter */
+#else
+    bool interp = true;        /* generic build (runner/interp_only.c): no recompiled code, interpreter only */
+#endif
     const char *audio_wav = NULL;   /* dump PSG output to this WAV */
     bool mute = false;              /* suppress live SDL audio (window build) */
     const char *route = NULL, *report = NULL;
@@ -458,7 +462,11 @@ int main(int argc, char **argv){
         host_set_internal_scale(internal_scale);
         host_set_hidden(hidden);
         char win_title[160];
+#ifdef SMSGG_HAVE_GAME_LAYOUT
         snprintf(win_title, sizeof win_title, "%s - recompiled", g_game_spec.display_name);
+#else
+        snprintf(win_title, sizeof win_title, "SMS/GG interpreter");   /* generic build: no game compiled in */
+#endif
         int cx = is_gg ? (SMS_SCREEN_W-GG_SCREEN_W)/2 : 0;
         int cy = is_gg ? (SMS_SCREEN_H-GG_SCREEN_H)/2 : 0;
         int cw = is_gg ? GG_SCREEN_W : SMS_SCREEN_W;

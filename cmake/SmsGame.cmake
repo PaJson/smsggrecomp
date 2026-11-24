@@ -1,5 +1,15 @@
 include_guard(GLOBAL)
 
+# Windows: the resource compiler embeds an optional program icon (see sms_add_game). enable_language
+# must run at file scope; this file is included at the top level of each game's CMakeLists.txt.
+if(WIN32)
+    include(CheckLanguage)
+    check_language(RC)
+    if(CMAKE_RC_COMPILER)
+        enable_language(RC)
+    endif()
+endif()
+
 # The game owns game.toml and generated artifacts; this framework owns every
 # build input and generation step shared by SMS/GG hosts.
 function(sms_add_game TARGET)
@@ -67,6 +77,27 @@ function(sms_add_game TARGET)
         target_compile_definitions(${TARGET} PRIVATE SMS_VDP_REFERENCE)
     endif()
     target_include_directories(${TARGET} PRIVATE "${_engine}/runner" "${_engine}/runner/include" "${_gen}")
+    # Optional program icon (Windows): SMSGG_ICON, else Images/Icon.ico in the game folder or up to
+    # 4 parent folders (the same Images folder the runner's art lookup uses, runner/art.h).
+    if(WIN32 AND CMAKE_RC_COMPILER)
+        set(_icon "${SMSGG_ICON}")
+        if(NOT _icon)
+            set(_dir "${CMAKE_CURRENT_SOURCE_DIR}")
+            foreach(_up RANGE 4)
+                if(EXISTS "${_dir}/Images/Icon.ico")
+                    set(_icon "${_dir}/Images/Icon.ico")
+                    break()
+                endif()
+                get_filename_component(_dir "${_dir}" DIRECTORY)
+            endforeach()
+        endif()
+        if(_icon AND EXISTS "${_icon}")
+            set(_rc "${CMAKE_CURRENT_BINARY_DIR}/app_icon.rc")
+            file(CONFIGURE OUTPUT "${_rc}" CONTENT "1 ICON \"${_icon}\"\n")
+            set_source_files_properties("${_rc}" PROPERTIES OBJECT_DEPENDS "${_icon}")
+            target_sources(${TARGET} PRIVATE "${_rc}")
+        endif()
+    endif()
     if(SMSGG_ENABLE_SDL)
         find_package(SDL2 CONFIG REQUIRED)
         target_sources(${TARGET} PRIVATE "${_engine}/runner/host_sdl.c")

@@ -50,6 +50,74 @@ static int benchmark_frame(const uint32_t *fb, int w, int h){
     (void)fb; (void)w; (void)h; return 0;
 }
 
+/* --title-shot <file.png> [--title-frames N] [--title-frame F]: find the game's title screen and save
+ * it (headless, no input, no save files), then quit. Used by front ends that show a picture of each
+ * game when the player supplied no cover art.
+ * The title = the longest stretch of a near-still, non-blank picture in the first N frames (default
+ * 3600 = 60 s): a stretch lasts while fewer than 10 % of the pixels differ from its first frame
+ * (title animations, blinking "PRESS START"); blank = under 5 % lit pixels or fewer than 4 colours
+ * (fades, black gaps, SEGA logo on black is short anyway). From the winning stretch the frame with
+ * the most pixels outside its main background colour is kept (blinking text / a logo that appears
+ * late are visible; "most lit pixels" failed on Sonic Chaos' light background). Checked on all 24
+ * builds of the project (Phantasy Star incl. 7 translations, Golvellius, Miracle Warriors, Sonic 1 /
+ * 2 / Chaos): their titles appear between frames 100 and 1500 and win against intros and attract
+ * demos. --title-frame F takes exactly frame F instead (per-game override).
+ * Writes the visible area (SMS 256x192, GG 160x144); exit code 0 = written, 1 = nothing found. */
+#include "png_write.h"
+#include "video/sms_vdp.h"           /* SMS_SCREEN_W / GG_SCREEN_W ... */
+static struct {
+    const char *out; uint64_t fixed, limit;
+    int cx, cy, w, h; size_t n;
+    uint32_t *cur, *ref, *cand, *best;
+    uint64_t run_start, best_len; size_t cand_score; bool have_ref, have_cand, have_best, written;
+} g_ts;
+static void ts_close_run(uint64_t f){
+    if (g_ts.have_cand && (!g_ts.have_best || f - g_ts.run_start > g_ts.best_len)){
+        uint32_t *t=g_ts.best; g_ts.best=g_ts.cand; g_ts.cand=t;
+        g_ts.best_len=f-g_ts.run_start; g_ts.have_best=true;
+    }
+    g_ts.have_cand=false; g_ts.cand_score=0;
+}
+static bool ts_write(const uint32_t *px){
+    char tmp[1100]; snprintf(tmp,sizeof tmp,"%s.tmp",g_ts.out);
+    if (png_write_argb(tmp,px,g_ts.w,g_ts.h,g_ts.w)!=0){ remove(tmp); return false; }
+    remove(g_ts.out);
+    if (rename(tmp,g_ts.out)!=0){ remove(tmp); return false; }
+    return true;
+}
+static int title_frame_cb(const uint32_t *fb, int w, int h){
+    (void)h;
+    if (!fb) return 0;
+    uint64_t f=glue_frame_count();
+    for (int y=0;y<g_ts.h;y++) memcpy(g_ts.cur+(size_t)y*g_ts.w, fb+(size_t)(y+g_ts.cy)*w+g_ts.cx, (size_t)g_ts.w*4);
+    if (g_ts.fixed){
+        if (f<g_ts.fixed) return 0;
+        g_ts.written=ts_write(g_ts.cur); return 1;
+    }
+    size_t lit=0, ncol=0, top=0; static uint32_t cnt[4096]; memset(cnt,0,sizeof cnt);
+    for (size_t i=0;i<g_ts.n;i++){
+        uint32_t p=g_ts.cur[i];
+        if (((p>>16)&255)+((p>>8)&255)+(p&255) > 60) lit++;
+        unsigned k=((p>>12)&0xF00)|((p>>8)&0xF0)|((p>>4)&0xF);
+        if (!cnt[k]++) ncol++;
+        if (cnt[k]>top) top=cnt[k];
+    }
+    size_t content=g_ts.n-top;          /* pixels not in the main background colour */
+    if (g_ts.have_ref){
+        size_t diff=0;
+        for (size_t i=0;i<g_ts.n;i++) diff+=g_ts.cur[i]!=g_ts.ref[i];
+        if (diff*10>g_ts.n){ ts_close_run(f); g_ts.have_ref=false; }
+    }
+    if (!g_ts.have_ref){ memcpy(g_ts.ref,g_ts.cur,g_ts.n*4); g_ts.have_ref=true; g_ts.run_start=f; }
+    if (lit*20>=g_ts.n && ncol>=4 && (!g_ts.have_cand || content>g_ts.cand_score)){
+        memcpy(g_ts.cand,g_ts.cur,g_ts.n*4); g_ts.cand_score=content; g_ts.have_cand=true;
+    }
+    if (f<g_ts.limit) return 0;
+    ts_close_run(f+1);
+    if (g_ts.have_best) g_ts.written=ts_write(g_ts.best);
+    return 1;
+}
+
 #ifdef SMS_HAVE_SDL
 #include "host_sdl.h"
 #include "hud.h"
@@ -291,6 +359,9 @@ int main(int argc, char **argv){
             if (!pf){ fprintf(stderr,"[runner] cannot open press file\n"); return 2; }
             while (fgets(ln,sizeof ln,pf)){ if (ln[0]>='0' && ln[0]<='9'){ ln[strcspn(ln,"\r\n")]=0; press_add(ln); } }
             fclose(pf); }
+        else if (strcmp(argv[i],"--title-shot")==0 && i+1<argc) g_ts.out=argv[++i];
+        else if (strcmp(argv[i],"--title-frames")==0 && i+1<argc) g_ts.limit=strtoull(argv[++i],NULL,0);
+        else if (strcmp(argv[i],"--title-frame")==0 && i+1<argc) g_ts.fixed=strtoull(argv[++i],NULL,0);
         else if (strcmp(argv[i],"--route")==0 && i+1<argc) route=argv[++i];
         else if (strcmp(argv[i],"--report")==0 && i+1<argc) report=argv[++i];
         else if (strcmp(argv[i],"--window")==0){
@@ -299,6 +370,15 @@ int main(int argc, char **argv){
         }
         else if (argv[i][0] != '-') rom = argv[i];
         else {fprintf(stderr,"[runner] unknown or incomplete arg: %s\n", argv[i]);return 2;}
+    }
+    if (g_ts.out){            /* title shot: headless, never read / write saves, no art, own frame limit */
+#ifdef _WIN32
+        _putenv("SMS_NO_SAVE=1"); _putenv("SMS_NO_ART=1");
+#else
+        setenv("SMS_NO_SAVE","1",1); setenv("SMS_NO_ART","1",1);
+#endif
+        if (!g_ts.limit) g_ts.limit=3600;
+        want_window=false; frames_set=true; frames=(g_ts.fixed ? g_ts.fixed : g_ts.limit)+2;
     }
     if (!rom){
         fprintf(stderr,"usage: %s <rom.sms|rom.gg> [--frames N] [--gg|--sms] "
@@ -342,6 +422,15 @@ int main(int argc, char **argv){
         if (coverage_route_frame(0)){coverage_route_close();return 1;}
     }
     if (g_benchmark) glue_set_frame_callback(benchmark_frame);
+    if (g_ts.out){
+        g_ts.w = is_gg ? GG_SCREEN_W : SMS_SCREEN_W; g_ts.h = is_gg ? GG_SCREEN_H : SMS_SCREEN_H;
+        g_ts.cx = (SMS_SCREEN_W-g_ts.w)/2; g_ts.cy = (SMS_SCREEN_H-g_ts.h)/2;
+        g_ts.n = (size_t)g_ts.w*g_ts.h;
+        g_ts.cur=malloc(g_ts.n*4); g_ts.ref=malloc(g_ts.n*4); g_ts.cand=malloc(g_ts.n*4); g_ts.best=malloc(g_ts.n*4);
+        if (!g_ts.cur || !g_ts.ref || !g_ts.cand || !g_ts.best) return 1;
+        glue_set_native_output(true);
+        glue_set_frame_callback(title_frame_cb);
+    }
     if (dump_out) glue_set_dump(dump_frame ? dump_frame : frames, dump_out);
     if (vdp_trace) glue_set_vdp_trace(vdp_trace);
     if (psg_log) glue_set_psg_log(psg_log);
@@ -437,6 +526,12 @@ int main(int argc, char **argv){
                                   (double)glue_frame_count() / 3600.0, glue_dispatch_miss_count());
         else fprintf(stderr,"[runner] stopped after %llu frames; dispatch misses: %d\n",
                      (unsigned long long)glue_frame_count(), glue_dispatch_miss_count()); }
+    if (g_ts.out){
+        if (g_ts.written) fprintf(stderr,"[runner] title shot -> %s (%s)\n", g_ts.out,
+                                  g_ts.fixed ? "fixed frame" : "longest still picture");
+        else fprintf(stderr,"[runner] title shot: no picture found, nothing written\n");
+        return g_ts.written ? 0 : 1;
+    }
     bool ok=!coverage_route_failed();
     if (report && !glue_write_report(report))ok=false;
     coverage_route_close();

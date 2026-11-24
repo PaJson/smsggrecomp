@@ -369,6 +369,21 @@ void hud_fill(uint32_t *fb, int w, int h, int x0, int y0, int x1, int y1, uint32
     fill(fb, w, h, x0, y0, x1, y1, argb, blend);
 }
 
+/* "quit the game?" box in the middle of the frame (Esc in a game, host_quit_asking); narrow enough
+   for the Game Gear's 160 px picture */
+void hud_draw_quit_prompt(uint32_t *fb, int w, int h){
+    static const char *const l[3] = { "QUIT THE GAME?", "ENTER / A  QUIT", "ESC / B  KEEP PLAYING" };
+    const uint32_t col[3] = { 0xFFFFE040, 0xFFFFFFFF, 0xFFFFFFFF }, CYAN = 0xFF60D0FF;
+    int bw = 6 * 21 + 16, bh = 3 * 12 + 14, x0 = (w - bw) / 2, y0 = (h - bh) / 2, x1 = x0 + bw, y1 = y0 + bh;
+    fill(fb, w, h, x0, y0, x1, y1, 0xFF101830, false);   /* solid: the game must not show through the text */
+    fill(fb, w, h, x0, y0, x1, y0 + 1, CYAN, false); fill(fb, w, h, x0, y1 - 1, x1, y1, CYAN, false);
+    fill(fb, w, h, x0, y0, x0 + 1, y1, CYAN, false); fill(fb, w, h, x1 - 1, y0, x1, y1, CYAN, false);
+    for (int i = 0; i < 3; i++){
+        int tw = 6 * (int)strlen(l[i]) - 1;
+        hud_text(fb, w, h, x0 + (bw - tw) / 2, y0 + 8 + i * 12 + (i ? 2 : 0), l[i], col[i]);
+    }
+}
+
 void hud_draw(uint32_t *fb, int w, int h){
     if (!s_open) return;
     const uint32_t WHITE = 0xFFFFFFFF, GREY = 0xFFA0A0B0, YEL = 0xFFFFE040, CYAN = 0xFF60D0FF;

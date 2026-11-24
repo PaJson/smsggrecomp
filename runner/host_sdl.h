@@ -32,6 +32,9 @@ bool host_init(int fb_w, int fb_h,
  * loop to the frame cap (see host_set_frame_cap). Returns true to keep running,
  * false if the user requested quit (window close / Esc). */
 bool host_present(const uint32_t *fb, int fb_w, int fb_h);
+/* Esc in a game asks "quit the game?" first: true while that prompt is open (the caller pauses the
+   emulation and draws hud_draw_quit_prompt over the frame; host_present returns false on "quit") */
+bool host_quit_asking(void);
 
 /* Cap the present loop to `fps` frames/sec using a precise wall-clock limiter,
  * so the game runs at realtime regardless of the monitor's refresh rate. Pass 0

@@ -474,6 +474,33 @@ static void draw_layers(int space, bool panel){
  * after it, e.g. inside the HUD, where the emulated frame stands still); SMS_WINDOW_SHOT_EXIT=1 quits after it */
 extern uint64_t glue_frame_count(void);
 static bool g_shot_quit;
+/* Esc asked "quit the game?" (see host_present); main.c pauses the emulation while it is open */
+static bool g_quit_ask;
+bool host_quit_asking(void){ return g_quit_ask; }
+
+/* test: SMS_TEST_KEYS="<emulated frame>:<SDL key name>,..." (e.g. "600:Escape,640:Return") pushes a
+   key press + release when that frame is presented (later frames once the emulation pauses: the
+   frame number is checked on every present, the list is in order) */
+static void test_keys(void){
+    static const char *s; static bool init;
+    if (!init){ s = getenv("SMS_TEST_KEYS"); init = true; }
+    static long paused_presents;
+    if (!s || !*s) return;
+    long f = atol(s); const char *c = strchr(s, ':'); if (!c) { s = NULL; return; }
+    if ((long)glue_frame_count() < f) return;
+    if (++paused_presents < 3) return;                     /* a couple of presents between keys */
+    paused_presents = 0;
+    char name[32]; size_t n = strcspn(c + 1, ","); if (n >= sizeof name) n = sizeof name - 1;
+    memcpy(name, c + 1, n); name[n] = 0;
+    SDL_Keycode k = SDL_GetKeyFromName(name);
+    SDL_Event ev; SDL_zero(ev);
+    ev.type = SDL_KEYDOWN; ev.key.state = SDL_PRESSED; ev.key.keysym.sym = k; ev.key.keysym.scancode = SDL_GetScancodeFromKey(k);
+    SDL_PushEvent(&ev);
+    ev.type = SDL_KEYUP; ev.key.state = SDL_RELEASED; SDL_PushEvent(&ev);
+    fprintf(stderr, "[host] test key %s at frame %llu\n", name, (unsigned long long)glue_frame_count());
+    s = c + 1 + n; if (*s == ',') s++;
+}
+
 static void window_shot(void){
     static long n = -1, target = 1, gtarget = -1, skip = 0; static const char *path;
     if (n < 0){ path = getenv("SMS_WINDOW_SHOT"); const char *f = getenv("SMS_WINDOW_SHOT_FRAME"); if (f) target = atol(f);
@@ -549,6 +576,7 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
     (void)fb_h;
 
     bool quit = g_shot_quit;
+    test_keys();
     SDL_Event e;
     while (SDL_PollEvent(&e)){
         if (e.type == SDL_QUIT) quit = true;
@@ -564,6 +592,23 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
         else if (e.type == SDL_CONTROLLERDEVICEADDED) pad_open(e.cdevice.which);
         else if (e.type == SDL_CONTROLLERDEVICEREMOVED){     /* pad timed out / unplugged: release all */
             g_pad_btn = 0; g_pad_axis = 0; g_pad_turbo = g_pad_slow = false; g_extra_pad = 0; nav_clear();
+        }
+        /* ---- quit prompt (Esc in the game; the emulation pauses, main.c draws hud_draw_quit_prompt):
+           Enter / Space / Z / pad A = quit; Esc / X / Backspace / F1 / pad B / Start / Back = keep playing,
+           so a double Esc never quits. Key and button releases fall through (held keys are let go). ---- */
+        else if (g_quit_ask && e.type == SDL_KEYDOWN && e.key.keysym.sym != SDLK_F11
+                 && !(e.key.keysym.sym == SDLK_RETURN && (e.key.keysym.mod & KMOD_ALT))){
+            if (e.key.repeat) continue;
+            switch (e.key.keysym.sym){
+                case SDLK_RETURN: case SDLK_KP_ENTER: case SDLK_SPACE: case SDLK_z: quit = true; break;
+                case SDLK_ESCAPE: case SDLK_x: case SDLK_BACKSPACE: case SDLK_F1: g_quit_ask = false; break;
+                default: break;
+            }
+        }
+        else if (g_quit_ask && e.type == SDL_CONTROLLERBUTTONDOWN){
+            Uint8 b = e.cbutton.button;
+            if (b == SDL_CONTROLLER_BUTTON_A) quit = true;
+            else if (b == SDL_CONTROLLER_BUTTON_B || b == SDL_CONTROLLER_BUTTON_START || b == SDL_CONTROLLER_BUTTON_BACK) g_quit_ask = false;
         }
         /* ---- settings HUD (hud.c): F1 / pad Start (SMS, hud_start_opens) or Back (GG) toggles;
            while open it owns the keys. SMS pad Back / F2 = side panel on / off (hud_toggle_panel), Back = Pause without a panel. ---- */
@@ -620,7 +665,7 @@ bool host_present(const uint32_t *fb, int fb_w, int fb_h){
                 g_pad_slow = v > 16000;
         }
         else if (e.type == SDL_KEYDOWN){
-            if (e.key.keysym.sym == SDLK_ESCAPE) quit = true;
+            if (e.key.keysym.sym == SDLK_ESCAPE){ if (!e.key.repeat){ g_quit_ask = true; nav_clear(); } }   /* asks first */
             else if (e.key.keysym.sym == SDLK_TAB) g_turbo = true;
             else { g_pad |= key_to_pad(e.key.keysym.sym); g_extra_key |= key_extra(e.key.keysym.sym); }
         } else if (e.type == SDL_KEYUP){

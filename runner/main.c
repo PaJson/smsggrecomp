@@ -134,13 +134,14 @@ static int sdl_frame_cb(const uint32_t *fb, int w, int h){
         fb = ovl;
     }
     bool keep = host_present(fb, w, h);
-    /* Settings HUD (hud.c, F1 / pad Back): the emulation pauses here; the last frame is shown
-     * with the overlay until the HUD is closed. Audio just runs dry (silence) meanwhile. */
-    if (keep && fb && hud_is_open()){
+    /* Settings HUD (hud.c, F1 / pad Back) or the quit prompt (Esc): the emulation pauses here; the
+     * last frame is shown with the overlay until it is closed. Audio just runs dry (silence) meanwhile. */
+    if (keep && fb && (hud_is_open() || host_quit_asking())){
         static uint32_t over[256 * 240];
-        while (keep && hud_is_open() && w * h <= (int)(sizeof over / sizeof over[0])){
+        while (keep && (hud_is_open() || host_quit_asking()) && w * h <= (int)(sizeof over / sizeof over[0])){
             memcpy(over, fb, (size_t)w * (size_t)h * sizeof(uint32_t));
             hud_draw(over, w, h);
+            if (host_quit_asking()) hud_draw_quit_prompt(over, w, h);
             keep = host_present(over, w, h);
         }
         if (keep) keep = host_present(fb, w, h);
@@ -497,6 +498,13 @@ int main(int argc, char **argv){
     } else {
         glue_run();
     }
+#ifdef _WIN32
+    /* Started by a front end (the launcher sets SMS_FRONTEND_PID)? While this window still has the
+       focus, allow the front end to take the foreground back: Windows only lets the foreground program
+       hand it on, and once this window is gone the launcher would come back without the focus. */
+    {   const char *fp = getenv("SMS_FRONTEND_PID");
+        if (fp && want_window) AllowSetForegroundWindow((DWORD)strtoul(fp, NULL, 10)); }
+#endif
     glue_sram_flush();
 
     if (benchmark_out){

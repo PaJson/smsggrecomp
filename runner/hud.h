@@ -79,6 +79,7 @@ enum { HUD_KEY_UP, HUD_KEY_DOWN, HUD_KEY_LEFT, HUD_KEY_RIGHT, HUD_KEY_CLOSE, HUD
 bool hud_is_open(void);
 void hud_key(int key);                               /* navigation / open-close */
 void hud_draw(uint32_t *fb, int w, int h);           /* draw over an ARGB frame */
+void hud_draw_quit_prompt(uint32_t *fb, int w, int h);   /* "QUIT THE GAME?" box (Esc, host_quit_asking) */
 /* Draw `text` (5x7 font, 6 px advance) at (x,y) in `argb`; returns the end x. Usable by games
  * that want to draw their own panels. */
 int  hud_text(uint32_t *fb, int w, int h, int x, int y, const char *text, uint32_t argb);

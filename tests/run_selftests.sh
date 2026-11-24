@@ -50,7 +50,11 @@ if $CC -I $R -DSMS_TEST_GENERATE tests/generator_bank_selftest.c $R/code_generat
 else echo "FAIL generate (fixture, see $OUT/generate.log)"; fails=$((fails + 1)); fi
 t native_hooks -- -DSMS_NATIVE_HOOKS $RUN tests/native_hooks_selftest.c
 
-t gpu_jobs -- $RUN -I runner/video $SDL -DSMS_GPU tests/gpu_jobs_selftest.c runner/host_gl.c runner/video/sms_vdp.c -lSDL2 -lopengl32
+# SMS_SELFTEST_SKIP_GPU=1: machines without a GPU (GitHub's Windows runners: with Microsoft's software
+# renderer gpu_jobs fails, with Mesa llvmpipe it hangs); it still runs on every PC with a GPU
+if [ -n "${SMS_SELFTEST_SKIP_GPU:-}" ]; then echo "skip gpu_jobs (SMS_SELFTEST_SKIP_GPU: no GPU)"
+else t gpu_jobs -- $RUN -I runner/video $SDL -DSMS_GPU tests/gpu_jobs_selftest.c runner/host_gl.c runner/video/sms_vdp.c -lSDL2 -lopengl32
+fi
 t reference_present -- $RUN $SDL -DSDL_MAIN_HANDLED -DSMS_HAVE_SDL -DSMS_GPU -DSMS_VDP_REFERENCE -DSMS_PSG_REFERENCE \
     tests/reference_present_selftest.c runner/host_sdl.c runner/host_gl.c $RUNNER -lSDL2 -lopengl32 -lgdiplus -lole32
 
